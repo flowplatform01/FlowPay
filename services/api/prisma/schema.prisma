@@ -1,0 +1,532 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AppStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ApiKeyType {
+  PUBLIC
+  SECRET
+  WEBHOOK
+}
+
+enum TransactionStatus {
+  PENDING
+  REQUIRES_ACTION
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  EXPIRED
+  UNDER_REVIEW
+}
+
+enum PaymentAttemptStatus {
+  CREATED
+  SENT_TO_GATEWAY
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  SETTLED
+  FAILED
+  COLLECTED_PENDING_PAYOUT
+}
+
+enum GatewayProvider {
+  CAMPAY
+  MAVIANCE
+  CINETPAY
+  FLUTTERWAVE
+  MONETBIL
+}
+
+enum OrchestrationMode {
+  PLATFORM_REVENUE
+  MULTI_TENANT
+}
+
+enum SettlementStrategy {
+  TWO_STEP_MIRROR
+  NATIVE_SPLIT
+}
+
+enum DestinationVerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum PayoutCoordinationStatus {
+  NOT_REQUIRED
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+enum OrchestrationMeterEventType {
+  PAYMENT_INTENT_INITIALIZED
+  PAYMENT_CAPTURED
+  PAYOUT_COORDINATED
+  SETTLEMENT_RECONCILED
+}
+
+enum RetryJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum FeeRuleType {
+  FLAT
+  PERCENTAGE
+  HYBRID
+  DYNAMIC
+}
+
+model Organization {
+  id                  String                       @id @default(cuid())
+  name                String
+  slug                String                       @unique
+  countryCode         String
+  settlementCurrency  String
+  apps                App[]
+  payoutDestinations  PayoutDestination[]
+  feeRules            FeeRule[]
+  providerAccesses    OrganizationProviderAccess[]
+  transactions        Transaction[]
+  settlements         Settlement[]
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
+  deletedAt           DateTime?
+  destinationProfiles DestinationProfile[]
+
+  @@index([slug])
+}
+
+model App {
+  id                         String                        @id @default(cuid())
+  name                       String
+  slug                       String                        @unique
+  status                     AppStatus                     @default(ACTIVE)
+  organizationId             String
+  clientId                   String                        @unique
+  clientSecretHash           String
+  webhookUrl                 String?
+  appPublicKey               String                        @unique
+  orchestrationCredits       Decimal                       @default(0) @db.Decimal(18, 2)
+  processingUnits            Decimal                       @default(0) @db.Decimal(18, 2)
+  infrastructureUsageBalance Decimal                       @default(0) @db.Decimal(18, 2)
+  mode1MeteringEnabled       Boolean                       @default(false)
+  mode2MeteringEnabled       Boolean                       @default(true)
+  destinationProfileProvisioningEnabled Boolean             @default(false)
+  destinationProfileAutoVerifyEnabled   Boolean             @default(false)
+  destinationProfileLimit               Int                 @default(0)
+  organization               Organization                  @relation(fields: [organizationId], references: [id])
+  apiKeys                    ApiKey[]
+  providerAccesses           AppProviderAccess[]
+  capabilities               AppCapabilityGrant[]
+  transactions               Transaction[]
+  destinationProfiles        DestinationProfile[]
+  meteringLedger             OrchestrationMeteringLedger[]
+  creditPurchases            CreditPurchaseIntent[]
+  createdAt                  DateTime                      @default(now())
+  updatedAt                  DateTime                      @updatedAt
+  deletedAt                  DateTime?
+
+  @@index([organizationId, status])
+}
+
+model ApiKey {
+  id         String     @id @default(cuid())
+  appId      String
+  type       ApiKeyType
+  label      String
+  hashedKey  String
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  app        App        @relation(fields: [appId], references: [id])
+  createdAt  DateTime   @default(now())
+
+  @@index([appId, type])
+}
+
+model AppProviderAccess {
+  id        String          @id @default(cuid())
+  appId     String
+  provider  GatewayProvider
+  isEnabled Boolean         @default(true)
+  priority  Int             @default(100)
+  app       App             @relation(fields: [appId], references: [id])
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([appId, provider])
+  @@index([provider, isEnabled])
+}
+
+model AppCapabilityGrant {
+  id         String   @id @default(cuid())
+  appId      String
+  capability String
+  isEnabled  Boolean  @default(true)
+  app        App      @relation(fields: [appId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([appId, capability])
+  @@index([capability, isEnabled])
+}
+
+model OrganizationProviderAccess {
+  id             String          @id @default(cuid())
+  organizationId String
+  provider       GatewayProvider
+  isEnabled      Boolean         @default(true)
+  organization   Organization    @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@unique([organizationId, provider])
+  @@index([provider, isEnabled])
+}
+
+model GatewayConfig {
+  id                 String           @id @default(cuid())
+  provider           GatewayProvider  @unique
+  displayName        String
+  isEnabled          Boolean          @default(true)
+  baseUrl            String
+  encryptedPublicKey String?
+  encryptedSecretKey String?
+  metadata           Json?
+  health             GatewayHealth?
+  attempts           PaymentAttempt[]
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+}
+
+model GatewayHealth {
+  id              String          @id @default(cuid())
+  provider        GatewayProvider @unique
+  status          String
+  latencyMs       Int?
+  lastCheckedAt   DateTime
+  errorMessage    String?
+  gatewayConfigId String          @unique
+  gatewayConfig   GatewayConfig   @relation(fields: [gatewayConfigId], references: [id])
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
+
+model FeeRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  type           FeeRuleType
+  flatAmount     Decimal?     @db.Decimal(18, 2)
+  percentageRate Decimal?     @db.Decimal(8, 4)
+  dynamicConfig  Json?
+  isActive       Boolean      @default(true)
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model PayoutDestination {
+  id              String       @id @default(cuid())
+  organizationId  String
+  label           String
+  destinationType String
+  destinationRef  String
+  currency        String
+  isDefault       Boolean      @default(false)
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  settlements     Settlement[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+}
+
+model DestinationProfile {
+  id                  String                        @id @default(cuid())
+  appId               String
+  organizationId      String
+  externalRecipientId String
+  providerType        GatewayProvider
+  payoutTarget        String
+  nativeSubaccountId  String?
+  settlementStrategy  SettlementStrategy            @default(TWO_STEP_MIRROR)
+  providerMetadata    Json?
+  verificationStatus  DestinationVerificationStatus @default(PENDING)
+  supportedRails              Json?
+  regionalCurrency            String
+  routingPreferences          Json?
+  // Recipient confirmation governance (LINE.md Part 3/4)
+  // A short-lived token is issued when an external app registers/updates a
+  // payout target. The actual recipient must confirm before status reaches VERIFIED.
+  confirmationToken           String?
+  confirmationTokenExpiresAt  DateTime?
+  confirmationRequestedAt     DateTime?
+  app                 App                           @relation(fields: [appId], references: [id])
+  organization        Organization                  @relation(fields: [organizationId], references: [id])
+  transactions        Transaction[]
+  payoutCoordinations PayoutCoordination[]
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
+  deletedAt           DateTime?
+
+  @@unique([appId, externalRecipientId])
+  @@index([organizationId, providerType, verificationStatus])
+  @@index([settlementStrategy, verificationStatus])
+}
+
+model Transaction {
+  id                      String                        @id @default(cuid())
+  appId                   String
+  organizationId          String
+  destinationProfileId    String?
+  externalRecipientId     String?
+  orchestrationMode       OrchestrationMode             @default(PLATFORM_REVENUE)
+  settlementStrategy      SettlementStrategy            @default(TWO_STEP_MIRROR)
+  externalReference       String
+  idempotencyKey          String
+  currency                String
+  amount                  Decimal                       @db.Decimal(18, 2)
+  grossAmount             Decimal                       @db.Decimal(18, 2)
+  gatewayFeeAmount        Decimal                       @db.Decimal(18, 2)
+  platformFeeAmount       Decimal                       @db.Decimal(18, 2)
+  netAmount               Decimal                       @db.Decimal(18, 2)
+  settlementAmount        Decimal                       @db.Decimal(18, 2)
+  settlementDestinationId String?
+  status                  TransactionStatus             @default(PENDING)
+  selectedProvider        GatewayProvider
+  customerName            String?
+  customerEmail           String?
+  customerPhone           String?
+  metadata                Json?
+  ipAddress               String?
+  failureReason           String?
+  app                     App                           @relation(fields: [appId], references: [id])
+  organization            Organization                  @relation(fields: [organizationId], references: [id])
+  destinationProfile      DestinationProfile?           @relation(fields: [destinationProfileId], references: [id])
+  paymentAttempts         PaymentAttempt[]
+  events                  TransactionEvent[]
+  settlements             Settlement[]
+  webhookLogs             WebhookLog[]
+  retryJobs               RetryJob[]
+  payoutCoordinations     PayoutCoordination[]
+  meteringLedger          OrchestrationMeteringLedger[]
+  createdAt               DateTime                      @default(now())
+  updatedAt               DateTime                      @updatedAt
+  deletedAt               DateTime?
+
+  @@unique([appId, idempotencyKey])
+  @@index([externalReference, status])
+  @@index([organizationId, createdAt])
+  @@index([appId, externalRecipientId])
+  @@index([destinationProfileId, status])
+  @@index([selectedProvider, status])
+  @@index([status, createdAt])
+}
+
+model PaymentAttempt {
+  id               String               @id @default(cuid())
+  transactionId    String
+  gatewayConfigId  String
+  status           PaymentAttemptStatus @default(CREATED)
+  requestPayload   Json?
+  responsePayload  Json?
+  gatewayReference String?
+  retryCount       Int                  @default(0)
+  startedAt        DateTime             @default(now())
+  completedAt      DateTime?
+  transaction      Transaction          @relation(fields: [transactionId], references: [id])
+  gatewayConfig    GatewayConfig        @relation(fields: [gatewayConfigId], references: [id])
+
+  @@index([transactionId, status])
+  @@index([gatewayReference])
+}
+
+model TransactionEvent {
+  id            String      @id @default(cuid())
+  transactionId String
+  eventType     String
+  payload       Json?
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+  createdAt     DateTime    @default(now())
+
+  @@index([transactionId, createdAt])
+}
+
+model Settlement {
+  id                  String             @id @default(cuid())
+  transactionId       String
+  organizationId      String
+  payoutDestinationId String?
+  status              SettlementStatus   @default(PENDING)
+  grossAmount         Decimal            @db.Decimal(18, 2)
+  gatewayFeeAmount    Decimal            @db.Decimal(18, 2)
+  platformFeeAmount   Decimal            @db.Decimal(18, 2)
+  settlementAmount    Decimal            @db.Decimal(18, 2)
+  destinationSnapshot Json?
+  transaction         Transaction        @relation(fields: [transactionId], references: [id])
+  organization        Organization       @relation(fields: [organizationId], references: [id])
+  payoutDestination   PayoutDestination? @relation(fields: [payoutDestinationId], references: [id])
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  @@index([organizationId, status])
+  @@index([transactionId, status])
+}
+
+model PayoutCoordination {
+  id                   String                   @id @default(cuid())
+  transactionId        String
+  destinationProfileId String?
+  provider             GatewayProvider
+  status               PayoutCoordinationStatus @default(PENDING)
+  idempotencyKey       String                   @unique
+  attempts             Int                      @default(0)
+  nextRunAt            DateTime?
+  requestPayload       Json?
+  responsePayload      Json?
+  failureReason        String?
+  transaction          Transaction              @relation(fields: [transactionId], references: [id])
+  destinationProfile   DestinationProfile?      @relation(fields: [destinationProfileId], references: [id])
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  @@index([transactionId, status])
+  @@index([provider, status])
+}
+
+model OrchestrationMeteringLedger {
+  id                               String                      @id @default(cuid())
+  appId                            String
+  transactionId                    String?
+  eventType                        OrchestrationMeterEventType
+  processingUnits                  Decimal                     @db.Decimal(18, 2)
+  orchestrationCredits             Decimal                     @db.Decimal(18, 2)
+  infrastructureUsageBalanceBefore Decimal                     @db.Decimal(18, 2)
+  infrastructureUsageBalanceAfter  Decimal                     @db.Decimal(18, 2)
+  metadata                         Json?
+  app                              App                         @relation(fields: [appId], references: [id])
+  transaction                      Transaction?                @relation(fields: [transactionId], references: [id])
+  createdAt                        DateTime                    @default(now())
+
+  @@index([appId, createdAt])
+  @@index([transactionId, eventType])
+}
+
+model WebhookLog {
+  id            String          @id @default(cuid())
+  transactionId String?
+  provider      GatewayProvider
+  requestId     String?
+  signature     String?
+  payload       Json
+  statusCode    Int?
+  processed     Boolean         @default(false)
+  errorMessage  String?
+  transaction   Transaction?    @relation(fields: [transactionId], references: [id])
+  createdAt     DateTime        @default(now())
+
+  @@index([provider, createdAt])
+  @@index([provider, requestId])
+}
+
+model RetryJob {
+  id            String         @id @default(cuid())
+  transactionId String?
+  queueName     String
+  reason        String
+  status        RetryJobStatus @default(QUEUED)
+  attempts      Int            @default(0)
+  nextRunAt     DateTime?
+  payload       Json?
+  transaction   Transaction?   @relation(fields: [transactionId], references: [id])
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([queueName, status])
+}
+
+model AdminUser {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  role         String
+  auditLogs    AuditLog[]
+  createdAt    DateTime   @default(now())
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+}
+
+model AuditLog {
+  id          String     @id @default(cuid())
+  adminUserId String?
+  actorType   String
+  actorId     String?
+  action      String
+  entityType  String
+  entityId    String?
+  payload     Json?
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id])
+  createdAt   DateTime   @default(now())
+
+  @@index([entityType, entityId])
+}
+
+// ─── Credit Purchase ───────────────────────────────────────────────────────────
+
+enum CreditPurchaseStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/// Tracks developer self-service credit top-up requests.
+/// Each intent is created when an app initiates a credit purchase via the API.
+/// It is finalized (COMPLETED) when the payment webhook confirms settlement,
+/// at which point credits are applied to the app's balance.
+model CreditPurchaseIntent {
+  id                  String                @id @default(cuid())
+  appId               String
+  externalReference   String                @unique
+  amountXaf           Decimal               @db.Decimal(18, 2)
+  creditAmountApplied Decimal?              @db.Decimal(18, 2)
+  status              CreditPurchaseStatus  @default(PENDING)
+  transactionId       String?
+  failureReason       String?
+  completedAt         DateTime?
+  app                 App                   @relation(fields: [appId], references: [id])
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@index([appId, status])
+  @@index([transactionId])
+  @@index([externalReference])
+}
+

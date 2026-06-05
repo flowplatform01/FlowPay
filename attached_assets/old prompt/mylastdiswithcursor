@@ -1,0 +1,39 @@
+Your .env mapping matches the CamPay dashboard:
+
+App Username → CAMPAY_USERNAME
+App Password → CAMPAY_PASSWORD
+App webhook key → CAMPAY_WEBHOOK_SECRET
+App ID → CAMPAY_APP_ID (widget only — do not use the Widget integration JS in FlowPay)
+Ignore the Widget integration page
+That snippet (campay.js, payButtonId, onSuccess) is for embedding CamPay on a merchant site. FlowPay already collects via the server adapter (/api/collect/ on confirm). You do not need to paste or save that widget code.
+
+One thing you still need: public webhooks
+CamPay cannot reach http://127.0.0.1:3011. Until a tunnel is set, payments may stay PROCESSING after MoMo approval.
+
+Install ngrok (you had a signup tab open).
+Run:
+ngrok http 3011
+Copy the https://….ngrok-free.app URL into .env:
+FLOWPAY_WEBHOOK_BASE_URL=https://YOUR-SUBDOMAIN.ngrok-free.app
+In CamPay → FlowPay app → Settings, set webhook/notify URL to:
+https://YOUR-SUBDOMAIN.ngrok-free.app/api/v1/webhooks/CAMPAY
+Restart the API (npm run dev in Flowpay/services/api).
+Optional: paste Permanent Access token into CAMPAY_ACCESS_TOKEN to skip the token round-trip (username/password already work).
+
+Test your first real payment
+Open http://localhost:3025
+Choose MTN Mobile Money
+Use a customer phone CamPay demo accepts (e.g. 237670000001)
+Complete MoMo on the phone
+Confirm success only when status is SUCCEEDED (webhook received)
+Re-check anytime:
+
+cd Flowpay/services/api
+npm run verify:campay
+curl http://127.0.0.1:3011/api/v1/health
+Look for "CAMPAY":"provider-sandbox".
+
+Security: .env holds live secrets — do not commit it to git. If it was ever pushed, rotate keys in the CamPay portal.
+
+After ngrok is running, paste your ngrok HTTPS URL (not the secrets) and we can confirm the webhook URL and run a full payment test together.
+

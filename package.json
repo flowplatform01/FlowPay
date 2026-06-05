@@ -1,0 +1,20 @@
+{
+  "name": "flowpay-platform",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "services/api",
+    "apps/checkout-web",
+    "packages/sdk"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @flowpay/api",
+    "dev:worker": "npm run worker --workspace @flowpay/api",
+    "dev:checkout": "npm run dev --workspace @flowpay/checkout-web",
+    "start:checkout": "npm run start --workspace @flowpay/checkout-web",
+    "build": "npm run build --workspace @flowpay/api && npm run build --workspace @flowpay/checkout-web && npm run build --workspace @flowpay/sdk",
+    "prisma:generate": "npm run prisma:generate --workspace @flowpay/api",
+    "prisma:migrate": "npm run prisma:migrate --workspace @flowpay/api",
+    "prisma:seed": "npm run prisma:seed --workspace @flowpay/api"
+  }
+}
