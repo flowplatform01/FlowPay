@@ -1,7 +1,10 @@
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { verifyInternalService } from "../auth/internal-auth.guard.js";
 import {
   DestinationProfileProvisioningError,
+  getDestinationProfileForApp,
+  initiateRecipientVerificationPayment,
   listDestinationProfiles,
   provisionDestinationProfileForApp,
   updateDestinationProfile,
@@ -11,8 +14,28 @@ import {
   updateDestinationProfileSchema,
   upsertDestinationProfileSchema
 } from "./destination-profiles.schema.js";
+import {
+  approveRecipientConfirmationSchema,
+  rejectRecipientConfirmationSchema
+} from "./recipient-confirmation.schema.js";
 import { prisma } from "../../config/db.js";
 import { verifyAppSecretKey } from "../auth/app-auth.guard.js";
+
+const recipientVerificationPaymentSchema = z.object({
+  paymentMethod: z.enum(["MTN_MOMO", "ORANGE_MONEY", "CARD_PAYMENT", "BANK_TRANSFER"]).optional(),
+  customerName: z.string().min(1).optional(),
+  customerEmail: z.string().email().optional(),
+  customerPhone: z.string().min(6).optional()
+});
+
+const recipientConfirmationRateLimit = {
+  config: {
+    rateLimit: {
+      max: 20,
+      timeWindow: "1 minute"
+    }
+  }
+};
 
 export async function registerDestinationProfileRoutes(app: FastifyInstance) {
   app.get("/internal/destination-profiles", { preHandler: [verifyInternalService] }, async (request) => {
@@ -51,11 +74,11 @@ export async function registerDestinationProfileRoutes(app: FastifyInstance) {
 
     try {
       const profile = await provisionDestinationProfileForApp(request.appAuth.appId, parsed.data);
+      const { buildRecipientConfirmationUrl } = await import("./recipient-confirmation.service.js");
 
       return reply.code(201).send({
         id: profile.id,
         externalRecipientId: profile.externalRecipientId,
-        providerType: profile.providerType,
         settlementStrategy: profile.settlementStrategy,
         verificationStatus: profile.verificationStatus,
         regionalCurrency: profile.regionalCurrency,
@@ -63,21 +86,93 @@ export async function registerDestinationProfileRoutes(app: FastifyInstance) {
         updatedAt: profile.updatedAt,
         ...(profile.confirmationToken
           ? {
-              confirmationUrl: (await import("./recipient-confirmation.service.js")).buildRecipientConfirmationUrl(
-                profile.id,
-                profile.confirmationToken
-              )
+              confirmationUrl: buildRecipientConfirmationUrl(profile.id, profile.confirmationToken),
+              confirmationRequired: true
             }
-          : {})
+          : {
+              confirmationRequired: false
+            })
       });
     } catch (error) {
       if (error instanceof DestinationProfileProvisioningError) {
         return reply.code(error.statusCode).send({ message: error.message });
       }
 
+      const { CapacityEligibilityError } = await import("../capacity-policy/capacity-policy.service.js");
+      if (error instanceof CapacityEligibilityError) {
+        return reply.code(error.statusCode).send({
+          message: error.message,
+          capacityEligibility: error.snapshot
+            ? {
+                reasons: error.snapshot.reasons.map((item) => item.message),
+                effectiveBalance: error.snapshot.effectiveBalance,
+                minCreditRequired: error.snapshot.minCreditRequired,
+                currentUsage: error.snapshot.currentUsage,
+                effectiveMaxCapacity: error.snapshot.effectiveMaxCapacity
+              }
+            : undefined
+        });
+      }
+
       throw error;
     }
   });
+
+  app.get("/destination-profiles/:externalRecipientId", { preHandler: [verifyAppSecretKey] }, async (request, reply) => {
+    if (!request.appAuth) {
+      return reply.code(401).send({ message: "Unauthorized" });
+    }
+
+    const { externalRecipientId } = request.params as { externalRecipientId: string };
+
+    try {
+      const profile = await getDestinationProfileForApp(request.appAuth.appId, externalRecipientId);
+      return reply.send({
+        id: profile.id,
+        externalRecipientId: profile.externalRecipientId,
+        verificationStatus: profile.verificationStatus,
+        regionalCurrency: profile.regionalCurrency,
+        updatedAt: profile.updatedAt
+      });
+    } catch (error) {
+      return reply.code(404).send({
+        message: error instanceof Error ? error.message : "Destination profile not found"
+      });
+    }
+  });
+
+  app.post(
+    "/destination-profiles/:externalRecipientId/verification-payment",
+    { preHandler: [verifyAppSecretKey] },
+    async (request, reply) => {
+      if (!request.appAuth) {
+        return reply.code(401).send({ message: "Unauthorized" });
+      }
+
+      const { externalRecipientId } = request.params as { externalRecipientId: string };
+      const parsed = recipientVerificationPaymentSchema.safeParse(request.body ?? {});
+
+      if (!parsed.success) {
+        return reply.code(400).send({ message: "Invalid recipient verification payment payload" });
+      }
+
+      try {
+        const transaction = await initiateRecipientVerificationPayment({
+          appId: request.appAuth.appId,
+          externalRecipientId,
+          ...parsed.data
+        });
+
+        return reply.code(201).send(transaction);
+      } catch (error) {
+        if (error instanceof DestinationProfileProvisioningError) {
+          return reply.code(error.statusCode).send({ message: error.message });
+        }
+
+        throw error;
+      }
+    }
+  );
 
   app.patch("/internal/destination-profiles/:id", { preHandler: [verifyInternalService] }, async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -90,9 +185,9 @@ export async function registerDestinationProfileRoutes(app: FastifyInstance) {
     return updateDestinationProfile(id, parsed.data);
   });
 
-  // ─── Recipient Confirmation (Governance) ──────────────────────────────────────
+  // ─── Recipient Confirmation Gateway ───────────────────────────────────────────
 
-  app.get("/checkout/recipient/:id", async (request, reply) => {
+  app.get("/checkout/recipient/:id", recipientConfirmationRateLimit, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { token?: string };
 
@@ -103,14 +198,7 @@ export async function registerDestinationProfileRoutes(app: FastifyInstance) {
     try {
       const { getRecipientConfirmationSession } = await import("./recipient-confirmation.service.js");
       const session = await getRecipientConfirmationSession(id, query.token);
-      return reply.send({
-        id: session.id,
-        externalRecipientId: session.externalRecipientId,
-        providerType: session.providerType,
-        payoutTarget: session.payoutTarget,
-        app: session.app,
-        organization: session.organization
-      });
+      return reply.send(session);
     } catch (error) {
       return reply.code(400).send({
         message: error instanceof Error ? error.message : "Invalid confirmation session"
@@ -118,36 +206,64 @@ export async function registerDestinationProfileRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post("/checkout/recipient/:id/approve", async (request, reply) => {
+  app.post("/checkout/recipient/:id/approve", recipientConfirmationRateLimit, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { token?: string };
+    const parsed = approveRecipientConfirmationSchema.safeParse(request.body ?? {});
 
     if (!query.token) {
       return reply.code(400).send({ message: "Confirmation token is required" });
     }
 
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "Invalid confirmation payload" });
+    }
+
     try {
       const { approveRecipientConfirmation } = await import("./recipient-confirmation.service.js");
-      await approveRecipientConfirmation(id, query.token);
-      return reply.send({ success: true, status: "VERIFIED" });
+      const profile = await approveRecipientConfirmation(id, query.token, parsed.data);
+      return reply.send({
+        success: true,
+        status: "VERIFIED",
+        externalRecipientId: profile.externalRecipientId,
+        payoutTarget: profile.payoutTarget
+      });
     } catch (error) {
+      const { CapacityEligibilityError } = await import("../capacity-policy/capacity-policy.service.js");
+      if (error instanceof CapacityEligibilityError) {
+        return reply.code(error.statusCode).send({
+          message: error.message,
+          capacityEligibility: error.snapshot
+            ? {
+                reasons: error.snapshot.reasons.map((item) => item.message),
+                canActivate: error.snapshot.canActivateRecipient
+              }
+            : undefined
+        });
+      }
+
       return reply.code(400).send({
         message: error instanceof Error ? error.message : "Failed to approve confirmation"
       });
     }
   });
 
-  app.post("/checkout/recipient/:id/reject", async (request, reply) => {
+  app.post("/checkout/recipient/:id/reject", recipientConfirmationRateLimit, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { token?: string };
+    const parsed = rejectRecipientConfirmationSchema.safeParse(request.body ?? {});
 
     if (!query.token) {
       return reply.code(400).send({ message: "Confirmation token is required" });
     }
 
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "Invalid rejection payload" });
+    }
+
     try {
       const { rejectRecipientConfirmation } = await import("./recipient-confirmation.service.js");
-      await rejectRecipientConfirmation(id, query.token);
+      await rejectRecipientConfirmation(id, query.token, parsed.data);
       return reply.send({ success: true, status: "REJECTED" });
     } catch (error) {
       return reply.code(400).send({

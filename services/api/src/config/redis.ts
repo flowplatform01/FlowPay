@@ -29,12 +29,22 @@ export function isRedisQuotaError(error: unknown) {
   return message.toLowerCase().includes("max requests limit exceeded");
 }
 
+function isRedisAvailabilityError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("ENOTFOUND") ||
+    message.includes("EAI_AGAIN") ||
+    message.includes("ENETUNREACH") ||
+    message.includes("ETIMEDOUT")
+  );
+}
+
 export function openRedisCircuit(label: string, error: unknown) {
   redisCircuitOpenUntil = Math.max(redisCircuitOpenUntil, Date.now() + REDIS_CIRCUIT_OPEN_MS);
   const message = error instanceof Error ? error.message : String(error);
   warnRedisThrottled(
     `circuit:${label}`,
-    `[Redis:${label}] Request quota exhausted; Redis-dependent queues/cache disabled for ${REDIS_CIRCUIT_OPEN_MS / 60_000} minutes. ${message}`
+    `[Redis:${label}] Redis is temporarily unavailable; Redis-dependent queues/cache disabled for ${REDIS_CIRCUIT_OPEN_MS / 60_000} minutes. ${message}`
   );
 }
 
@@ -77,7 +87,7 @@ export function createRedisConnection(label = "redis"): Redis | null {
 
   const client = new Redis(env.REDIS_URL, getRedisConnectionConfig("queue"));
   client.on("error", (err) => {
-    if (isRedisQuotaError(err)) {
+    if (isRedisQuotaError(err) || isRedisAvailabilityError(err)) {
       openRedisCircuit(label, err);
       client.disconnect(false);
       return;
@@ -112,7 +122,7 @@ async function initRedis(): Promise<Redis | null> {
 
       const longLivedClient = new Redis(env.REDIS_URL, getRedisConnectionConfig("health"));
       longLivedClient.on("error", (err) => {
-        if (isRedisQuotaError(err)) {
+        if (isRedisQuotaError(err) || isRedisAvailabilityError(err)) {
           openRedisCircuit("health", err);
           longLivedClient.disconnect(false);
           return;
@@ -125,7 +135,7 @@ async function initRedis(): Promise<Redis | null> {
 
       return longLivedClient;
     } catch (error) {
-      if (isRedisQuotaError(error)) {
+      if (isRedisQuotaError(error) || isRedisAvailabilityError(error)) {
         openRedisCircuit("startup", error);
         client.disconnect();
         if (env.NODE_ENV !== "production") {

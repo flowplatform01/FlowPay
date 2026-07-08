@@ -7,6 +7,8 @@ import { dispatchAppWebhook } from "../modules/webhooks/app-webhook.service.js";
 import { processGatewayWebhook } from "../modules/webhooks/gateway-webhook.service.js";
 import { processDuePayoutCoordinations } from "../modules/payouts/payout-coordination.service.js";
 import { executeAsynchronousCharge } from "../modules/checkout/checkout.service.js";
+import { processDueRevenuePayouts } from "../modules/revenue-payouts/revenue-payouts.service.js";
+import { expireStalePendingCheckoutTransactions } from "../modules/transactions/transactions.service.js";
 
 const retryWorkerConnection = createRedisConnection("worker:retry");
 const webhookWorkerConnection = createRedisConnection("worker:webhook");
@@ -165,9 +167,19 @@ setInterval(() => {
   runWorkerSweep("providerless processing review", markProviderlessProcessingTransactionsForReview);
 }, 60_000).unref();
 
+runWorkerSweep("stale pending checkout expiry", expireStalePendingCheckoutSessions);
+setInterval(() => {
+  runWorkerSweep("stale pending checkout expiry", expireStalePendingCheckoutSessions);
+}, 15 * 60_000).unref();
+
 runWorkerSweep("payout coordination execution", processDuePayoutCoordinations);
 setInterval(() => {
   runWorkerSweep("payout coordination execution", processDuePayoutCoordinations);
+}, 60_000).unref();
+
+runWorkerSweep("revenue payout execution", processDueRevenuePayouts);
+setInterval(() => {
+  runWorkerSweep("revenue payout execution", processDueRevenuePayouts);
 }, 60_000).unref();
 
 setInterval(() => {
@@ -285,5 +297,18 @@ async function markProviderlessProcessingTransactionsForReview() {
     } catch (error) {
       console.warn(`[Worker] Providerless processing review failed for ${transaction.id}: ${formatErrorMessage(error)}`);
     }
+  }
+}
+
+async function expireStalePendingCheckoutSessions() {
+  const result = await expireStalePendingCheckoutTransactions({
+    olderThanMinutes: 12 * 60,
+    limit: 100,
+    reason: "Hosted checkout expired before customer authorization started"
+  });
+
+  const expired = "expired" in result ? (result.expired ?? 0) : 0;
+  if (expired > 0) {
+    console.log(`[Worker] Expired ${expired} stale pending hosted checkout session(s).`);
   }
 }

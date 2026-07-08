@@ -1,7 +1,9 @@
 import { GatewayProvider } from "@prisma/client";
+import { env } from "../../config/env.js";
 
 export const GATEWAY_PROVIDERS = [
   GatewayProvider.CAMPAY,
+  GatewayProvider.FAPSHI,
   GatewayProvider.MAVIANCE,
   GatewayProvider.CINETPAY,
   GatewayProvider.FLUTTERWAVE,
@@ -17,6 +19,7 @@ export type ProviderCapability =
   | "CAMEROON_ROUTING"
   | "TELECOM_FALLBACK"
   | "MOBILE_FIRST_COLLECTION"
+  | "MOBILE_MONEY_PAYOUT"
   | "BANK_RAILS"
   | "GIMAC_INTEROPERABILITY"
   | "ENTERPRISE_UTILITY_EXECUTION"
@@ -33,6 +36,15 @@ const defaultProviderCapabilities: Record<GatewayProviderValue, ProviderCapabili
     "MTN_COLLECTION",
     "ORANGE_COLLECTION",
     "CAMEROON_ROUTING"
+  ],
+  [GatewayProvider.FAPSHI]: [
+    "LOCAL_MOMO_COLLECTION",
+    "MTN_COLLECTION",
+    "ORANGE_COLLECTION",
+    "CAMEROON_ROUTING",
+    "REGIONAL_DISBURSEMENT",
+    "MOBILE_FIRST_COLLECTION",
+    "MOBILE_MONEY_PAYOUT"
   ],
   [GatewayProvider.MONETBIL]: [
     "LOCAL_MOMO_COLLECTION",
@@ -97,10 +109,32 @@ export function assertProviderCanAcceptTraffic(
     throw new Error(`${provider} is currently disabled for new payment requests`);
   }
 
+  if (!providerHasOperationalRuntime(provider)) {
+    throw new Error(`${provider} is not ready for payment processing because provider credentials are not configured`);
+  }
+
   const status = config.health?.status?.toLowerCase();
   if (status === "offline" || status === "down") {
     const reason = config.health?.errorMessage ? `: ${config.health.errorMessage}` : "";
     throw new Error(`${provider} is currently unavailable for new payment requests${reason}`);
+  }
+}
+
+export function providerHasOperationalRuntime(provider: GatewayProviderValue) {
+  switch (provider) {
+    case GatewayProvider.CAMPAY:
+      return Boolean(env.CAMPAY_ACCESS_TOKEN || (env.CAMPAY_USERNAME && env.CAMPAY_PASSWORD));
+    case GatewayProvider.FAPSHI:
+      return Boolean(env.FAPSHI_HAS_LIVE_CREDENTIALS || env.FAPSHI_HAS_SANDBOX_CREDENTIALS);
+    case GatewayProvider.MAVIANCE:
+      return Boolean(env.MAVIANCE_API_KEY && env.MAVIANCE_SECRET_KEY);
+    case GatewayProvider.CINETPAY:
+      return Boolean((env.CINETPAY_API_KEY || env.CINETPAY_PUBLIC_KEY) && env.CINETPAY_SITE_ID);
+    case GatewayProvider.FLUTTERWAVE:
+    case GatewayProvider.MONETBIL:
+      return false;
+    default:
+      return false;
   }
 }
 

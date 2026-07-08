@@ -1,12 +1,19 @@
 import type { GatewayProvider, Prisma } from "@prisma/client";
 import { prisma } from "../../config/db.js";
+import { generateOpaqueKey } from "../../utils/crypto.js";
 import { recordAuditEvent } from "../audit/audit.service.js";
+import { CONFIRMATION_GATEWAY_WORKFLOWS } from "../confirmation-gateway/confirmation-gateway.types.js";
+import {
+  resolveOperationalProviderFromPaymentMethod,
+  resolveProviderFromPaymentMethod,
+  type PaymentMethodId
+} from "../payments/payment-channels.js";
 
 type DestinationProfileInput = {
   appId: string;
   organizationId: string;
   externalRecipientId: string;
-  providerType: GatewayProvider;
+  providerType?: GatewayProvider;
   payoutTarget: string;
   nativeSubaccountId?: string | null;
   settlementStrategy: "TWO_STEP_MIRROR" | "NATIVE_SPLIT";
@@ -49,6 +56,10 @@ export async function listDestinationProfiles(appId?: string) {
 }
 
 export async function upsertDestinationProfile(input: DestinationProfileInput) {
+  if (!input.providerType) {
+    throw new DestinationProfileProvisioningError("Destination provider could not be resolved", 400);
+  }
+
   const serialized = serializeDestinationProfileInput(input);
   const profile = await prisma.destinationProfile.upsert({
     where: {
@@ -121,31 +132,30 @@ export async function provisionDestinationProfileForApp(
     throw new DestinationProfileProvisioningError("Recipient provisioning is not enabled for this application", 403);
   }
 
-  const providerAccess = app.providerAccesses.find((provider) => provider.provider === input.providerType);
+  const resolvedProviderType =
+    input.providerType ??
+    await resolveOperationalProviderFromPaymentMethod(resolvePreferredPaymentMethod(input.routingPreferences), {
+      appProviderAccesses: app.providerAccesses
+    });
+
+  const providerAccess = app.providerAccesses.find((provider) => provider.provider === resolvedProviderType);
   if (!providerAccess?.isEnabled) {
-    throw new DestinationProfileProvisioningError(`${input.providerType} is not enabled for this application`, 403);
+    throw new DestinationProfileProvisioningError(`${resolvedProviderType} is not enabled for this application`, 403);
   }
 
   const existing = app.destinationProfiles.find((profile) => profile.externalRecipientId === input.externalRecipientId);
+  const isNewRecipientSlot =
+    !existing || existing.verificationStatus === "REJECTED" || existing.verificationStatus === "SUSPENDED";
+
+  if (isNewRecipientSlot) {
+    const { assertRecipientCapacityEligible } = await import("../capacity-policy/capacity-policy.service.js");
+    await assertRecipientCapacityEligible({ appId, forActivation: false });
+  }
+
   const limit = app.destinationProfileLimit;
-
-  if (!existing && limit <= 0) {
-    throw new DestinationProfileProvisioningError(
-      "Recipient profile limit is not configured for this application",
-      409
-    );
-  }
-
-  if (!existing && app.destinationProfiles.length >= limit) {
-    throw new DestinationProfileProvisioningError(
-      `Recipient profile limit reached for this application (${limit})`,
-      409
-    );
-  }
-
   const targetChanged =
     existing &&
-    (existing.providerType !== input.providerType || existing.payoutTarget !== input.payoutTarget);
+    (existing.providerType !== resolvedProviderType || existing.payoutTarget !== input.payoutTarget);
   const verificationStatus =
     app.destinationProfileAutoVerifyEnabled || (existing?.verificationStatus === "VERIFIED" && !targetChanged)
       ? "VERIFIED"
@@ -155,6 +165,7 @@ export async function provisionDestinationProfileForApp(
     appId,
     organizationId: app.organizationId,
     ...input,
+    providerType: resolvedProviderType,
     verificationStatus
   });
 
@@ -178,6 +189,7 @@ export async function provisionDestinationProfileForApp(
     payload: {
       externalRecipientId: profile.externalRecipientId,
       providerType: profile.providerType,
+      requestedPaymentMethod: resolvePreferredPaymentMethod(input.routingPreferences),
       verificationStatus: profile.verificationStatus,
       autoVerified: app.destinationProfileAutoVerifyEnabled,
       targetChanged: Boolean(targetChanged),
@@ -252,6 +264,181 @@ export async function resolveDestinationProfile(appId: string, externalRecipient
   return profile;
 }
 
+export async function getDestinationProfileForApp(appId: string, externalRecipientId: string) {
+  const profile = await prisma.destinationProfile.findFirst({
+    where: {
+      appId,
+      externalRecipientId,
+      deletedAt: null
+    },
+    select: {
+      id: true,
+      externalRecipientId: true,
+      verificationStatus: true,
+      regionalCurrency: true,
+      updatedAt: true
+    }
+  });
+
+  if (!profile) {
+    throw new Error("Destination profile not found");
+  }
+
+  return profile;
+}
+
+export async function initiateRecipientVerificationPayment(input: {
+  appId: string;
+  externalRecipientId: string;
+  paymentMethod?: PaymentMethodId;
+  customerName?: string;
+  customerEmail?: string;
+  customerPhone?: string;
+}) {
+  const app = await prisma.app.findUniqueOrThrow({
+    where: { id: input.appId },
+    include: {
+      organization: true,
+      providerAccesses: true,
+      capabilities: true
+    }
+  });
+
+  if (app.status !== "ACTIVE") {
+    throw new DestinationProfileProvisioningError("Application is not active", 403);
+  }
+
+  if (!app.recipientVerificationPaymentEnabled) {
+    throw new DestinationProfileProvisioningError("Recipient verification payment is not enabled for this application", 403);
+  }
+
+  const profile = await prisma.destinationProfile.findFirst({
+    where: {
+      appId: input.appId,
+      externalRecipientId: input.externalRecipientId,
+      deletedAt: null
+    }
+  });
+
+  if (!profile) {
+    throw new DestinationProfileProvisioningError("Recipient profile was not found", 404);
+  }
+
+  if (profile.verificationStatus === "VERIFIED") {
+    throw new DestinationProfileProvisioningError("Recipient profile is already verified", 409);
+  }
+
+  if (["REJECTED", "SUSPENDED"].includes(profile.verificationStatus)) {
+    throw new DestinationProfileProvisioningError(`Recipient profile is ${profile.verificationStatus.toLowerCase()}`, 403);
+  }
+
+  const provider = input.paymentMethod
+    ? resolveProviderFromPaymentMethod(input.paymentMethod)
+    : profile.providerType;
+
+  const providerAccess = app.providerAccesses.find((access) => access.provider === provider);
+  if (providerAccess && !providerAccess.isEnabled) {
+    throw new DestinationProfileProvisioningError(`${provider} is not enabled for this application`, 403);
+  }
+
+  const amountXaf = Number(app.recipientVerificationAmountXaf);
+  if (!Number.isFinite(amountXaf) || amountXaf <= 0) {
+    throw new DestinationProfileProvisioningError("Recipient verification amount is not configured correctly", 500);
+  }
+
+  const idempotencyKey = generateOpaqueKey("rverify");
+  const displayName = readProfileDisplayName(profile.providerMetadata) ?? profile.externalRecipientId;
+  const { createTransaction } = await import("../transactions/transactions.service.js");
+
+  const transaction = await createTransaction({
+    appId: app.id,
+    organizationId: app.organizationId,
+    idempotencyKey,
+    externalReference: `recipient-verification-${profile.id}-${Date.now()}`,
+    amount: amountXaf,
+    currency: "XAF",
+    provider,
+    customerName: input.customerName,
+    customerEmail: input.customerEmail,
+    customerPhone: input.customerPhone,
+    deferCapture: true,
+    appProfile: app,
+    metadata: {
+      __flowpay_recipient_verification: true,
+      __flowpay_confirmation_gateway: CONFIRMATION_GATEWAY_WORKFLOWS.RECIPIENT_VERIFICATION,
+      recipientVerificationProfileId: profile.id,
+      externalRecipientId: profile.externalRecipientId,
+      recipientName: displayName,
+      checkoutDescription: `Verify saved recipient ${displayName}`
+    }
+  });
+
+  await recordAuditEvent({
+    action: "destination_profile.verification_payment_initialized",
+    actorType: "APP",
+    actorId: app.id,
+    entityType: "DestinationProfile",
+    entityId: profile.id,
+    payload: {
+      transactionId: transaction.id,
+      externalRecipientId: profile.externalRecipientId,
+      provider,
+      amountXaf
+    }
+  });
+
+  return transaction;
+}
+
+export async function maybeFinalizeRecipientVerificationFromTransaction(transaction: {
+  id: string;
+  appId?: string;
+  status: string;
+  metadata: unknown;
+  failureReason?: string | null;
+}) {
+  const metadata = readRecipientVerificationMetadata(transaction.metadata);
+  if (!metadata) {
+    return;
+  }
+
+  if (transaction.status === "SUCCEEDED") {
+    const profile = await prisma.destinationProfile.update({
+      where: { id: metadata.recipientVerificationProfileId },
+      data: {
+        verificationStatus: "VERIFIED",
+        confirmationToken: null,
+        confirmationTokenExpiresAt: null
+      }
+    });
+
+    await recordAuditEvent({
+      action: "destination_profile.verified_by_payment",
+      actorType: "INTERNAL_SERVICE",
+      entityType: "DestinationProfile",
+      entityId: profile.id,
+      payload: {
+        transactionId: transaction.id,
+        externalRecipientId: profile.externalRecipientId
+      }
+    });
+    return;
+  }
+
+  if (transaction.status === "FAILED") {
+    await recordAuditEvent({
+      action: "destination_profile.verification_payment_failed",
+      actorType: "INTERNAL_SERVICE",
+      entityType: "DestinationProfile",
+      entityId: metadata.recipientVerificationProfileId,
+      payload: {
+        transactionId: transaction.id,
+        reason: transaction.failureReason ?? "Verification payment failed"
+      }
+    });
+  }
+}
+
 function serializeDestinationProfileInput(input: DestinationProfileInput): Prisma.DestinationProfileUncheckedUpdateInput {
   return {
     providerType: input.providerType,
@@ -265,4 +452,46 @@ function serializeDestinationProfileInput(input: DestinationProfileInput): Prism
     routingPreferences: input.routingPreferences as Prisma.InputJsonValue | undefined,
     deletedAt: null
   };
+}
+
+function readProfileDisplayName(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+
+  const value = (metadata as Record<string, unknown>).displayName;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function resolvePreferredPaymentMethod(routingPreferences?: Record<string, unknown>): PaymentMethodId {
+  const preferred = routingPreferences?.preferredMethod;
+  if (
+    preferred === "MTN_MOMO" ||
+    preferred === "ORANGE_MONEY" ||
+    preferred === "CARD_PAYMENT" ||
+    preferred === "BANK_TRANSFER"
+  ) {
+    return preferred;
+  }
+
+  return "MTN_MOMO";
+}
+
+function readRecipientVerificationMetadata(
+  metadata: unknown
+): { recipientVerificationProfileId: string } | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+
+  const record = metadata as Record<string, unknown>;
+  if (record.__flowpay_recipient_verification !== true) {
+    return null;
+  }
+
+  if (typeof record.recipientVerificationProfileId !== "string") {
+    return null;
+  }
+
+  return { recipientVerificationProfileId: record.recipientVerificationProfileId };
 }

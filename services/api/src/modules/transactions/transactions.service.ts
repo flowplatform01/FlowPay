@@ -1,5 +1,5 @@
 import { Prisma, type GatewayProvider, type OrchestrationMode } from "@prisma/client";
-import { prisma } from "../../config/db.js";
+import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { parseIpAddress } from "../../utils/http.js";
 import { normalizePhoneNumber } from "../../utils/phone.js";
 import { LatencyTimer } from "../../utils/performance.js";
@@ -7,7 +7,12 @@ import { addQueueJobSafely, retryQueue, webhookQueue } from "../../lib/queues.js
 import { getGatewayAdapter } from "../gateways/gateways.service.js";
 import { calculateFees } from "../fees/fees.service.js";
 import {
+  buildFeeBreakdownMetadata,
+  resolvePlatformFeeInputs
+} from "../fees/fee-rule.resolver.js";
+import {
   buildSettlementBreakdown,
+  finalizeSettlementsForTransaction,
   settlementStatusForTransaction
 } from "../settlements/settlements.service.js";
 import {
@@ -23,6 +28,7 @@ import {
 } from "../orchestration/metering.service.js";
 import { isCreditPurchaseTransaction } from "../credits/credits.service.js";
 import { assertProviderCanAcceptTraffic } from "../providers/provider-registry.js";
+import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
 
 const SHORT_ROUTING_CACHE_TTL_MS = 5_000;
 const ROUTING_CACHE_TTL_MS = 30_000;
@@ -100,7 +106,8 @@ export async function createTransaction(input: {
   timer.mark("resolve-route");
 
   const isCreditPurchase = isCreditPurchaseTransaction(input.metadata);
-  const shouldMeter = !isCreditPurchase && shouldMeterTransaction(appProfile, route.mode);
+  const isRecipientVerification = isRecipientVerificationTransaction(input.metadata);
+  const shouldMeter = !isCreditPurchase && !isRecipientVerification && shouldMeterTransaction(appProfile, route.mode);
 
   const appProviderAccess = appProfile.providerAccesses.find((provider) => provider.provider === route.provider);
   if (appProviderAccess && !appProviderAccess.isEnabled) {
@@ -130,6 +137,11 @@ export async function createTransaction(input: {
     getCachedRoutingDependency(`fee-rule:${input.organizationId}`, ROUTING_CACHE_TTL_MS, () =>
       prisma.feeRule.findFirst({
         where: { organizationId: input.organizationId, isActive: true },
+        include: {
+          ranges: {
+            orderBy: { sortOrder: "asc" }
+          }
+        },
         orderBy: { createdAt: "desc" }
       })
     ),
@@ -151,11 +163,12 @@ export async function createTransaction(input: {
   assertProviderCanAcceptTraffic(route.provider, gateway);
 
   const gatewayMetadata = asRecord(gateway.metadata);
+  const platformFeeInputs = resolvePlatformFeeInputs(feeRule, input.amount);
   const fees = calculateFees({
     baseAmount: input.amount,
     currency: input.currency,
-    flatAmount: feeRule?.flatAmount ? Number(feeRule.flatAmount) : 0,
-    percentageRate: feeRule?.percentageRate ? Number(feeRule.percentageRate) : 0,
+    flatAmount: platformFeeInputs.flatAmount,
+    percentageRate: platformFeeInputs.percentageRate,
     gatewayFlatAmount: asNumber(gatewayMetadata.providerFeeFlatAmount),
     gatewayPercentageRate: asNumber(gatewayMetadata.providerFeePercentageRate)
   });
@@ -183,6 +196,13 @@ export async function createTransaction(input: {
   const checkoutSessionToken = deferCapture ? createCheckoutSessionToken() : undefined;
   const transactionMetadata = {
     ...(input.metadata ?? {}),
+    feeBreakdown: buildFeeBreakdownMetadata(
+      input.amount,
+      input.currency,
+      platformFeeInputs,
+      fees,
+      settlement.settlementAmount
+    ),
     ...(deferCapture
       ? {
           hostedCheckout: true,
@@ -389,6 +409,24 @@ export async function createTransaction(input: {
   ]);
   timer.mark("persist-post-charge-batch");
 
+  if (nextStatus === "SUCCEEDED") {
+    await prisma.$transaction(
+      (tx) =>
+        recordPlatformFeeCapture(tx, {
+          id: transaction.id,
+          status: nextStatus,
+          currency: input.currency,
+          platformFeeAmount: new Prisma.Decimal(fees.platformFeeAmount),
+          externalReference: input.externalReference,
+          selectedProvider: route.provider,
+          appId: input.appId,
+          organizationId: input.organizationId
+        }),
+      prismaTransactionOptions
+    );
+    timer.mark("capture-treasury-platform-fee");
+  }
+
   if (nextStatus === "SUCCEEDED" && route.mode === "MULTI_TENANT" && route.settlementStrategy === "TWO_STEP_MIRROR") {
     await prisma.payoutCoordination.upsert({
       where: {
@@ -413,6 +451,17 @@ export async function createTransaction(input: {
       status: nextStatus,
       metadata: transactionMetadata,
       settlementAmount: settlement.settlementAmount,
+      failureReason: nextStatus === "FAILED" ? "Gateway returned failure status" : null
+    });
+  }
+
+  if (isRecipientVerification && (nextStatus === "SUCCEEDED" || nextStatus === "FAILED")) {
+    const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
+    await maybeFinalizeRecipientVerificationFromTransaction({
+      id: transaction.id,
+      appId: transaction.appId,
+      status: nextStatus,
+      metadata: transactionMetadata,
       failureReason: nextStatus === "FAILED" ? "Gateway returned failure status" : null
     });
   }
@@ -717,6 +766,119 @@ export async function markTransactionUnderReview(transactionId: string, note?: s
   });
 
   return transaction;
+}
+
+export async function expireStalePendingCheckoutTransactions(input?: {
+  olderThanMinutes?: number;
+  limit?: number;
+  dryRun?: boolean;
+  reason?: string;
+}) {
+  const olderThanMinutes = Math.max(input?.olderThanMinutes ?? 12 * 60, 30);
+  const limit = Math.min(Math.max(input?.limit ?? 100, 1), 500);
+  const cutoff = new Date(Date.now() - olderThanMinutes * 60_000);
+  const reason =
+    input?.reason ?? `Checkout session expired after ${olderThanMinutes} minutes without provider authorization`;
+
+  const candidates = await prisma.transaction.findMany({
+    where: {
+      status: "PENDING",
+      updatedAt: { lt: cutoff },
+      paymentAttempts: { none: {} },
+      events: {
+        some: {
+          eventType: "checkout.session_created"
+        }
+      }
+    },
+    select: {
+      id: true,
+      externalReference: true,
+      status: true,
+      orchestrationMode: true,
+      settlementStrategy: true,
+      createdAt: true,
+      updatedAt: true
+    },
+    orderBy: { updatedAt: "asc" },
+    take: limit
+  });
+
+  if (input?.dryRun) {
+    return {
+      dryRun: true,
+      cutoff,
+      candidates
+    };
+  }
+
+  let expired = 0;
+
+  for (const transaction of candidates) {
+    await prisma.$transaction(async (tx) => {
+      const updateResult = await tx.transaction.updateMany({
+        where: {
+          id: transaction.id,
+          status: "PENDING",
+          paymentAttempts: { none: {} }
+        },
+        data: {
+          status: "EXPIRED",
+          failureReason: reason
+        }
+      });
+
+      if (updateResult.count !== 1) {
+        return;
+      }
+
+      await finalizeSettlementsForTransaction(tx, {
+        transactionId: transaction.id,
+        status: "EXPIRED",
+        orchestrationMode: transaction.orchestrationMode,
+        settlementStrategy: transaction.settlementStrategy
+      });
+
+      await tx.transactionEvent.create({
+        data: {
+          transactionId: transaction.id,
+          eventType: "transaction.expired",
+          payload: {
+            previousStatus: transaction.status,
+            reason,
+            cutoff
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      await tx.retryJob.create({
+        data: {
+          transactionId: transaction.id,
+          queueName: "stale-pending-expiry",
+          reason,
+          status: "SUCCEEDED",
+          attempts: 1,
+          payload: {
+            previousStatus: transaction.status,
+            cutoff
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      expired += 1;
+    });
+  }
+
+  return {
+    dryRun: false,
+    cutoff,
+    expired,
+    inspected: candidates.length
+  };
+}
+
+function isRecipientVerificationTransaction(metadata?: Record<string, unknown> | null) {
+  return metadata?.__flowpay_recipient_verification === true;
 }
 
 export async function enqueueTransactionRetry(transactionId: string, reason?: string) {

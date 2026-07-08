@@ -4,6 +4,7 @@ import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 import { getGatewayAdapter } from "../gateways/gateways.service.js";
 import type { GatewayStatusResult } from "../gateways/gateway.types.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
+import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
 
 const terminalStatuses: TransactionStatus[] = ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED", "UNDER_REVIEW"];
 
@@ -154,6 +155,19 @@ export async function reconcileTransaction(input: {
         settlementStrategy: transaction.settlementStrategy
       });
 
+      if (inferredStatus === "SUCCEEDED") {
+        await recordPlatformFeeCapture(tx, {
+          id: transaction.id,
+          status: inferredStatus,
+          currency: transaction.currency,
+          platformFeeAmount: transaction.platformFeeAmount,
+          externalReference: transaction.externalReference,
+          selectedProvider: transaction.selectedProvider,
+          appId: transaction.appId,
+          organizationId: transaction.organizationId
+        });
+      }
+
       if (
         inferredStatus === "SUCCEEDED" &&
         transaction.orchestrationMode === "MULTI_TENANT" &&
@@ -226,6 +240,15 @@ export async function reconcileTransaction(input: {
     status: inferredStatus,
     metadata: transaction.metadata,
     settlementAmount: transaction.settlementAmount,
+    failureReason: transaction.failureReason
+  });
+
+  const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
+  await maybeFinalizeRecipientVerificationFromTransaction({
+    id: transaction.id,
+    appId: transaction.appId,
+    status: inferredStatus,
+    metadata: transaction.metadata,
     failureReason: transaction.failureReason
   });
 

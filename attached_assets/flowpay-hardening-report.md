@@ -2,6 +2,48 @@
 
 Date: 2026-05-18
 
+## Fapshi Provider Integration Pass - 2026-06-21
+
+Scope:
+
+- Added Fapshi as a first-class FlowPay gateway provider without exposing gateway names to checkout customers.
+- Kept customer-facing rails as MTN Mobile Money, Orange Money, Card, and Bank Transfer while allowing FlowPay to route mobile-money traffic internally through Fapshi when configured.
+- Preserved CamPay as an operationally supported provider and fallback path.
+
+Implemented:
+
+- Added `FAPSHI` to the gateway provider model, provider registry, Prisma seed, and production gateway configuration migrations.
+- Added a Fapshi gateway adapter with direct mobile-money collection, transaction status lookup, payout execution, provider balance lookup, and webhook secret validation.
+- Added Fapshi environment parsing for live/sandbox base URLs, API user, API key, and webhook secret.
+- Added runtime credential separation so local development/test uses Fapshi sandbox credentials, while production uses live Fapshi credentials.
+- Updated payment rail routing so configured Fapshi credentials can power MTN Mobile Money and Orange Money internally.
+- Updated webhook normalization so Fapshi `transId`, `externalId`, and terminal statuses propagate into FlowPay transaction lifecycle handling.
+- Added authenticated internal provider balance lookup at `GET /api/v1/internal/providers/:provider/balance`.
+- Updated Flow Admin provider typing and provider settings so Fapshi can be displayed and managed by operations.
+
+Validation:
+
+- Fapshi adapter unit/contract test passed: `FAPSHI_ADAPTER_TEST_OK`.
+- FlowPay API TypeScript check passed with `tsc --noEmit`.
+- Flow Admin backend TypeScript check passed with `tsc --noEmit`.
+- Flow Admin frontend TypeScript check passed with `tsc --noEmit`.
+- Prisma migration deployment and client generation completed for the Fapshi provider enum/config changes.
+- Runtime health check returned database `ok`, Redis `ok`, Fapshi in real provider-adapter mode, and CamPay still available in real provider-adapter mode.
+- Internal Fapshi balance lookup returned successfully with XAF balance data present.
+- Fapshi sandbox credentials were loaded locally and verified through the internal balance endpoint.
+- Checkout failure messaging was corrected so provider validation errors such as invalid MTN/Orange phone numbers are persisted and shown instead of a generic failure.
+- External Test App defaults were updated to use provider-valid Cameroon mobile-money test numbers and to block mobile-money amounts below Fapshi's `100 XAF` minimum.
+- External Test App saved-recipient provisioning now creates mobile-money destination profiles through Fapshi instead of routing new mobile-money recipients to older placeholder providers.
+- A controlled external-app checkout initialization passed with MTN Mobile Money and the corrected default phone number.
+- A controlled invalid-phone sandbox failure confirmed that FlowPay now stores the actionable provider reason.
+- A controlled saved-recipient creation smoke passed and returned a recipient confirmation URL.
+
+Operational notes:
+
+- No live Fapshi collection or payout was executed during this pass to avoid moving real funds without an explicit controlled test request.
+- Fapshi enforces a minimum transaction amount of `100 XAF`; sandbox/live test flows below this amount should use another configured rail or expect a validation failure.
+- Real Fapshi webhook delivery still requires the deployed/public webhook URL to be configured in the Fapshi dashboard.
+
 ## Final Production Completion Addendum
 
 This final pass focused on correctness at payment finality boundaries, async worker behavior, Flow Admin stability, and realistic end-to-end validation.
@@ -930,3 +972,249 @@ Runtime caveat:
 
 - Full FlowPay API runtime validation could not be completed in this pass because the configured Neon database became unreachable from the active session (`P1001: Can't reach database server`). Redis fallback behavior was observed, but payment/credit runtime endpoints require database availability.
 - Build commands that write into existing `dist` folders hit Windows `EPERM` locks from active local processes, so non-emitting TypeScript checks were used for validation without killing unrelated user processes.
+
+## Mode 1/Mode 2 Outflow, Split Recovery, and Recipient Verification Closure - 2026-06-14
+
+Scope:
+
+- Extended existing FlowPay behavior without redesigning the payment core.
+- Addressed Mode 1 platform revenue exit, Mode 2 split/payout fallback, and optional recipient verification payment.
+- Kept provider/orchestration details backend-private and surfaced only operational controls in Flow Admin.
+
+Implemented:
+
+- Added `RevenuePayout` persistence and `RevenuePayoutStatus` for controlled Mode 1 revenue exits.
+- Added internal revenue payout endpoints:
+  - list payout requests
+  - check available settled Mode 1 revenue balance
+  - create payout request
+  - process/retry payout request
+- Added worker sweep support for due revenue payout execution.
+- Corrected Mode 1 revenue balance calculation to count only settled, successful `PLATFORM_REVENUE` transactions in the target currency.
+- Added Mode 2 payout fallback support through destination profile routing preferences:
+  - primary provider remains the default
+  - fallback providers are only used when explicitly enabled on the destination profile
+  - attempted providers and fallback usage are recorded in transaction events/audit payloads
+- Added optional app-level recipient verification payment settings:
+  - `recipientVerificationPaymentEnabled`
+  - `recipientVerificationAmountXaf`
+- Added merchant-authenticated endpoint to initiate a recipient verification checkout for a saved recipient.
+- Wired recipient verification finalization into checkout completion, direct transaction completion, gateway webhook processing, and reconciliation.
+- Flow Admin now surfaces:
+  - recipient verification payment toggle and amount on app configuration
+  - Mode 1 revenue payout operational table
+  - manual process/retry action for revenue payouts
+  - separate Mode 1 revenue payout metrics in Operations
+
+Validation:
+
+- FlowPay Prisma schema validation passed.
+- FlowPay API source type check passed with `tsc --noEmit`.
+- Flow Admin backend source type check passed with `tsc --noEmit`.
+- Flow Admin frontend source type check passed with `tsc --noEmit`.
+
+Runtime caveat:
+
+- The confirmation-gateway contract script could not run because the local FlowPay API was not listening on `3011`.
+- Starting the API in the active environment did not reach `listen` within the timeout, even with escalated network access. Runtime contract validation should be rerun once the API can connect to its configured database/Redis services and bind locally.
+
+## Runtime Finalization Pass - 2026-06-19
+
+Scope:
+
+- Revalidated the FlowPay runtime after the restart / Codex credit interruption.
+- Closed the previously listed runtime caveat for the Mode 1/Mode 2 and recipient verification phase.
+- Rechecked the merchant-facing External Test App against the live FlowPay API, checkout, worker, Neon database, and Upstash Redis configuration.
+
+Corrections:
+
+- Applied the two pending Prisma migrations to the configured database:
+  - `20260608120000_advanced_billing_ranges`
+  - `20260608150000_mode1_revenue_payouts_and_recipient_verification`
+- Updated the External Test App real CamPay UI smoke script to use the current customer-facing button label: `Open Checkout`.
+- Adjusted the recipient-confirmation E2E regression path to use the Card rail for automated collection while still validating saved-recipient setup, recipient confirmation, checkout, and transfer completion. This avoids making the regression suite depend on live MTN mobile-money confirmation timing.
+
+Validation:
+
+- FlowPay API started on `3011`.
+- FlowPay checkout started on `3010`.
+- FlowPay worker started for queue/reconciliation processing.
+- Health check returned:
+  - database `ok`
+  - Redis `ok`
+  - CamPay in provider sandbox mode
+  - fallback providers in internal sandbox mode
+- API contract passed:
+  - `CONFIRMATION_GATEWAY_CONTRACT_OK`
+- External merchant UI smoke passed:
+  - `FLOWPAY_REAL_UI_OK cmqi7cnr2000vjh7kgg5tog1f`
+- Full External Test App Playwright suite passed:
+  - credit purchase checkout
+  - normal hosted checkout success
+  - hosted checkout failure handling
+  - recipient setup, recipient confirmation edit, and saved-recipient transfer completion
+  - result: `4 passed`
+
+Notes:
+
+- The E2E setup still reports `Skipping app provisioning prep — missing internal token or public key`; this is not a blocker for the current suite because it uses the already configured external test app credentials.
+- Real MTN/Orange mobile-money flows remain provider-timing dependent by nature. The automated production regression path now uses deterministic rails where appropriate, while real mobile-money testing should still be performed manually with valid sandbox or live provider numbers.
+
+## Perfect.md Finalization Pass - 2026-06-28
+
+Scope:
+
+- Re-read and applied the final `Perfect.md` corrections around Fapshi runtime mode, route-fee terminology, stale pending transaction hygiene, and runtime validation.
+
+Corrections:
+
+- Changed Fapshi credential selection from startup `NODE_ENV` binding to FlowPay provider-route mode resolution:
+  - Flow Admin provider mode now controls sandbox/live behavior.
+  - Sandbox remains the safe fallback when provider metadata is unavailable.
+  - Explicit `FAPSHI_LIVE_*` aliases were added while preserving existing live credential names.
+  - Webhook verification accepts the configured live/sandbox Fapshi secrets without leaking secrets into logs.
+- Updated payment rail routing to treat Fapshi as available when either live or sandbox credentials are configured, while the adapter selects the active environment per request.
+- Clarified fee semantics:
+  - `gatewayFeeAmount` remains a compatibility field, but it now represents FlowPay route pricing, not a live pass-through provider charge.
+  - Admin labels were changed from gateway/provider fee wording to route-fee wording where operators configure or inspect pricing.
+- Added stale hosted-checkout cleanup:
+  - Internal endpoint: `POST /api/v1/internal/transactions/stale-pending/expire`
+  - Worker sweep expires only old `PENDING` hosted checkouts with no payment attempts.
+  - Active processing transactions and provider-referenced transactions continue through reconciliation/review paths.
+- Applied the historical cleanup with a 12-hour threshold:
+  - 42 old hosted checkout transactions were moved from `PENDING` to `EXPIRED`.
+  - Follow-up dry run returned no remaining stale candidates.
+
+Validation:
+
+- FlowPay API build passed.
+- Fapshi adapter test passed: `FAPSHI_ADAPTER_TEST_OK`.
+- Checkout TypeScript check passed.
+- Flow Admin backend build passed.
+- Flow Admin frontend build passed.
+- FlowPay API restarted on `3011` with database `ok` and Redis `ok`.
+- FlowPay worker restarted with retry, webhook, charge, payout, revenue payout, reconciliation, and stale-checkout sweeps enabled.
+- Fapshi provider balance lookup succeeded against the active provider runtime.
+- Local surfaces listening:
+  - API `3011`
+  - Checkout `3010`
+  - External Test App `3025`
+  - Flow Admin backend `5001`
+  - Flow Admin frontend `5173`
+
+## God.md Treasury and Gateway Hardening Pass - 2026-07-02
+
+Scope:
+
+- Implemented the central FlowPay Treasury ledger foundation requested in `God.md`.
+- Hardened gateway lifecycle behavior so unsupported provider adapters cannot produce fake customer-facing success.
+- Added Flow Admin Treasury visibility and reconciliation controls.
+- Rechecked runtime startup, migrations, builds, and local app availability.
+
+Corrections:
+
+- Added immutable Treasury ledger schema:
+  - `TreasuryLedgerEntry`
+  - `TreasuryWithdrawal`
+  - ledger entry type, direction, status, and withdrawal status enums.
+- Added Treasury capture hooks for confirmed platform fees across:
+  - hosted checkout capture
+  - direct transaction capture
+  - webhook status updates
+  - transaction reconciliation.
+- Added internal Treasury APIs:
+  - `GET /api/v1/internal/treasury`
+  - `POST /api/v1/internal/treasury/reconcile`
+- Optimized Treasury reconciliation to batch-create missing platform-fee ledger entries with duplicate protection.
+- Optimized Treasury overview to aggregate balances without scanning the full ledger table.
+- Added Flow Admin Treasury page:
+  - available treasury balance
+  - total platform revenue
+  - pending fee exposure
+  - reconciliation status
+  - immutable ledger history
+  - withdrawal register placeholder for future controlled Treasury withdrawals.
+- Added Flow Admin proxy action for Treasury reconciliation.
+- Hardened payment method provider resolution:
+  - public UX still shows customer payment rails such as MTN Mobile Money, Orange Money, Card, and Bank Transfer.
+  - internal providers without operational credentials are rejected before processing.
+  - Card/Bank no longer fall through to internal sandbox adapters as fake successful payments.
+- Added a queued-checkout failure guard so provider readiness failures mark the transaction failed through the normal transaction/event/settlement path instead of leaving checkout stuck in processing.
+- Reduced Redis retry noise:
+  - DNS/network Redis failures now open a temporary circuit and stop redundant reconnect loops.
+
+Validation:
+
+- Applied migration:
+  - `20260701120000_treasury_ledger`
+- Prisma client generation passed.
+- FlowPay API build passed.
+- Flow Admin backend build passed.
+- Flow Admin frontend build passed.
+- FlowPay API health returned:
+  - database `ok`
+  - Redis `ok`
+  - CamPay/Fapshi using provider runtime
+  - non-configured providers visible as internal adapters but blocked from payment processing by runtime gating.
+- Treasury reconciliation executed successfully:
+  - missing captures before reconcile: `11`
+  - inspected: `11`
+  - recorded: `11`
+  - remaining estimate: `0`
+- Treasury final state:
+  - reconciliation status: `RECONCILED`
+  - missing captures: `0`
+  - ledger entries: `121`
+  - available treasury balance: `5234 XAF`
+  - total platform revenue: `5234 XAF`
+- Non-integrated Card scenario through the External Test App failed correctly:
+  - status `400`
+  - message: `No operational provider is configured for this payment method`
+  - no fake success returned to the merchant app.
+- FlowPay worker restarted after Redis circuit patch:
+  - Redis connected on attempt `1`
+  - queue processing enabled
+  - asynchronous charge worker enabled.
+- Local surfaces listening:
+  - API `3011`
+  - Checkout `3010`
+  - External Test App `3025`
+  - Flow Admin backend `5001`
+  - Flow Admin frontend `5173`
+
+Latest Finalization Pass:
+
+- Redis root and API environment configuration now point to the replacement Upstash instance after the previous Redis host was confirmed unavailable.
+- Replacement Redis connectivity was verified with `PONG`.
+- Checkout payment-method availability is now dynamic:
+  - active rails remain selectable
+  - inactive Card/Bank rails remain visible but unavailable
+  - no false provider success is exposed to the customer.
+- FlowPay Treasury withdrawals are now an explicit controlled workflow:
+  - request/reserve
+  - approve
+  - cancel/reverse
+  - execute through a provider payout adapter when deliberately approved.
+- Treasury withdrawals are independent from merchant Mode 1/Mode 2 payout flows and are fully ledger/audit-backed.
+- Flow Admin Treasury UX was reorganized into tabbed workspaces for overview, ledger, withdrawals, and new withdrawal requests.
+- A low-risk treasury smoke test passed:
+  - created a `1 XAF` treasury withdrawal reservation
+  - status became `PENDING_APPROVAL`
+  - cancelled it
+  - final status became `CANCELLED`
+  - no payout was executed.
+- Builds passed:
+  - FlowPay API
+  - FlowPay Checkout
+  - Flow Admin backend
+  - Flow Admin frontend.
+- Local services are up:
+  - API `3011`
+  - Checkout `3010`
+  - External Test App `3025`
+  - Flow Admin backend `5001`
+  - Flow Admin frontend `5173`.
+
+Notes:
+
+- Provider adapters may still be present internally for development and health diagnostics, but external payment attempts are blocked unless the chosen provider has operational credentials and gateway availability.

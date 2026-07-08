@@ -23,6 +23,11 @@ const organizationInclude = {
     where: {
       isActive: true
     },
+    include: {
+      ranges: {
+        orderBy: { sortOrder: "asc" as const }
+      }
+    },
     orderBy: { createdAt: "desc" as const }
   },
   providerAccesses: {
@@ -45,7 +50,7 @@ export async function createOrganization(input: {
   countryCode: string;
   settlementCurrency: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const organizationId = await prisma.$transaction(async (tx) => {
     const organization = await tx.organization.create({
       data: {
         name: input.name,
@@ -58,8 +63,7 @@ export async function createOrganization(input: {
             isEnabled: true
           }))
         }
-      },
-      include: organizationInclude
+      }
     });
 
     await tx.auditLog.create({
@@ -77,7 +81,12 @@ export async function createOrganization(input: {
       }
     });
 
-    return organization;
+    return organization.id;
+  });
+
+  return prisma.organization.findUniqueOrThrow({
+    where: { id: organizationId },
+    include: organizationInclude
   });
 }
 
@@ -150,7 +159,7 @@ export async function upsertPayoutDestination(
     isDefault?: boolean;
   }
 ) {
-  return prisma.$transaction(async (tx) => {
+  const destination = await prisma.$transaction(async (tx) => {
     if (input.isDefault) {
       await tx.payoutDestination.updateMany({
         where: {
@@ -189,14 +198,16 @@ export async function upsertPayoutDestination(
       }
     });
 
-    return {
-      destination,
-      organization: await tx.organization.findUniqueOrThrow({
-        where: { id: organizationId },
-        include: organizationInclude
-      })
-    };
+    return destination;
   });
+
+  return {
+    destination,
+    organization: await prisma.organization.findUniqueOrThrow({
+      where: { id: organizationId },
+      include: organizationInclude
+    })
+  };
 }
 
 export async function createFeeRule(
@@ -210,7 +221,7 @@ export async function createFeeRule(
     isActive?: boolean;
   }
 ) {
-  return prisma.$transaction(async (tx) => {
+  const feeRule = await prisma.$transaction(async (tx) => {
     if (input.isActive ?? true) {
       await tx.feeRule.updateMany({
         where: {
@@ -252,14 +263,16 @@ export async function createFeeRule(
       }
     });
 
-    return {
-      feeRule,
-      organization: await tx.organization.findUniqueOrThrow({
-        where: { id: organizationId },
-        include: organizationInclude
-      })
-    };
+    return feeRule;
   });
+
+  return {
+    feeRule,
+    organization: await prisma.organization.findUniqueOrThrow({
+      where: { id: organizationId },
+      include: organizationInclude
+    })
+  };
 }
 
 export async function updateFeeRule(
@@ -277,7 +290,7 @@ export async function updateFeeRule(
     where: { id: feeRuleId }
   });
 
-  return prisma.$transaction(async (tx) => {
+  const feeRule = await prisma.$transaction(async (tx) => {
     if (input.isActive) {
       await tx.feeRule.updateMany({
         where: {
@@ -319,14 +332,16 @@ export async function updateFeeRule(
       }
     });
 
-    return {
-      feeRule,
-      organization: await tx.organization.findUniqueOrThrow({
-        where: { id: current.organizationId },
-        include: organizationInclude
-      })
-    };
+    return feeRule;
   });
+
+  return {
+    feeRule,
+    organization: await prisma.organization.findUniqueOrThrow({
+      where: { id: current.organizationId },
+      include: organizationInclude
+    })
+  };
 }
 
 async function ensureOrganizationProviderDefaults() {

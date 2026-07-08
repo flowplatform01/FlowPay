@@ -12,6 +12,7 @@
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:seed": "tsx prisma/seed.ts",
     "verify:campay": "tsx scripts/verify-campay.ts",
+    "test:contract": "node scripts/confirmation-gateway.contract.mjs",
     "zero:fees": "tsx scripts/zero-all-fees.ts"
   },
   "dependencies": {

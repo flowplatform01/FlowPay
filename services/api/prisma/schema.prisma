@@ -47,6 +47,7 @@ enum SettlementStatus {
 
 enum GatewayProvider {
   CAMPAY
+  FAPSHI
   MAVIANCE
   CINETPAY
   FLUTTERWAVE
@@ -78,11 +79,23 @@ enum PayoutCoordinationStatus {
   FAILED
 }
 
+enum RevenuePayoutStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
 enum OrchestrationMeterEventType {
   PAYMENT_INTENT_INITIALIZED
   PAYMENT_CAPTURED
   PAYOUT_COORDINATED
   SETTLEMENT_RECONCILED
+}
+
+enum CapacityResourceType {
+  RECIPIENT
 }
 
 enum RetryJobStatus {
@@ -99,6 +112,42 @@ enum FeeRuleType {
   DYNAMIC
 }
 
+enum FeeRangeFallbackStrategy {
+  USE_STANDARD_RULE
+  REJECT
+  ZERO_FEE
+}
+
+enum TreasuryLedgerEntryType {
+  PLATFORM_FEE_CAPTURED
+  WITHDRAWAL_RESERVED
+  WITHDRAWAL_EXECUTED
+  WITHDRAWAL_REVERSED
+  ADJUSTMENT
+}
+
+enum TreasuryLedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+enum TreasuryLedgerStatus {
+  PENDING
+  AVAILABLE
+  SETTLED
+  VOID
+}
+
+enum TreasuryWithdrawalStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
 model Organization {
   id                  String                       @id @default(cuid())
   name                String
@@ -111,6 +160,7 @@ model Organization {
   providerAccesses    OrganizationProviderAccess[]
   transactions        Transaction[]
   settlements         Settlement[]
+  revenuePayouts      RevenuePayout[]
   createdAt           DateTime                     @default(now())
   updatedAt           DateTime                     @updatedAt
   deletedAt           DateTime?
@@ -137,6 +187,8 @@ model App {
   destinationProfileProvisioningEnabled Boolean             @default(false)
   destinationProfileAutoVerifyEnabled   Boolean             @default(false)
   destinationProfileLimit               Int                 @default(0)
+  recipientVerificationPaymentEnabled   Boolean             @default(false)
+  recipientVerificationAmountXaf        Decimal             @default(100) @db.Decimal(18, 2)
   organization               Organization                  @relation(fields: [organizationId], references: [id])
   apiKeys                    ApiKey[]
   providerAccesses           AppProviderAccess[]
@@ -145,11 +197,55 @@ model App {
   destinationProfiles        DestinationProfile[]
   meteringLedger             OrchestrationMeteringLedger[]
   creditPurchases            CreditPurchaseIntent[]
+  capacityPolicyOverrides    AppCapacityPolicyOverride[]
   createdAt                  DateTime                      @default(now())
   updatedAt                  DateTime                      @updatedAt
   deletedAt                  DateTime?
 
   @@index([organizationId, status])
+}
+
+model CapacityPolicyDefinition {
+  id                 String               @id @default(cuid())
+  resourceType       CapacityResourceType @unique
+  enforcementEnabled Boolean              @default(true)
+  tiers              CapacityPolicyTier[]
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+}
+
+model CapacityPolicyTier {
+  id                 String                   @id @default(cuid())
+  definitionId       String
+  definition         CapacityPolicyDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  tierKey            String
+  name               String
+  description        String?
+  sortOrder          Int
+  maxCapacity        Int?
+  minEffectiveCredit Decimal                  @db.Decimal(18, 2)
+  enabled            Boolean                  @default(true)
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  @@unique([definitionId, tierKey])
+  @@index([definitionId, sortOrder])
+}
+
+model AppCapacityPolicyOverride {
+  id                         String               @id @default(cuid())
+  appId                      String
+  app                        App                  @relation(fields: [appId], references: [id], onDelete: Cascade)
+  resourceType               CapacityResourceType
+  enforcementDisabled        Boolean              @default(false)
+  maxCapacityOverride        Int?
+  minEffectiveCreditOverride Decimal?             @db.Decimal(18, 2)
+  unlimitedCapacityGranted   Boolean              @default(false)
+  notes                      String?
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+
+  @@unique([appId, resourceType])
 }
 
 model ApiKey {
@@ -236,17 +332,38 @@ model GatewayHealth {
 }
 
 model FeeRule {
-  id             String       @id @default(cuid())
-  organizationId String
-  name           String
+  id                     String                   @id @default(cuid())
+  organizationId         String
+  name                   String
+  type                   FeeRuleType
+  flatAmount             Decimal?                 @db.Decimal(18, 2)
+  percentageRate         Decimal?                 @db.Decimal(8, 4)
+  dynamicConfig          Json?
+  advancedBillingEnabled Boolean                  @default(false)
+  rangeFallbackStrategy  FeeRangeFallbackStrategy @default(USE_STANDARD_RULE)
+  isActive               Boolean                  @default(true)
+  organization           Organization             @relation(fields: [organizationId], references: [id])
+  ranges                 FeeRuleRange[]
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+}
+
+model FeeRuleRange {
+  id             String      @id @default(cuid())
+  feeRuleId      String
+  feeRule        FeeRule     @relation(fields: [feeRuleId], references: [id], onDelete: Cascade)
+  name           String?
+  sortOrder      Int
+  minAmount      Decimal     @db.Decimal(18, 2)
+  maxAmount      Decimal?    @db.Decimal(18, 2)
   type           FeeRuleType
-  flatAmount     Decimal?     @db.Decimal(18, 2)
-  percentageRate Decimal?     @db.Decimal(8, 4)
-  dynamicConfig  Json?
-  isActive       Boolean      @default(true)
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  flatAmount     Decimal?    @db.Decimal(18, 2)
+  percentageRate Decimal?    @db.Decimal(8, 4)
+  isEnabled      Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([feeRuleId, sortOrder])
 }
 
 model PayoutDestination {
@@ -259,6 +376,7 @@ model PayoutDestination {
   isDefault       Boolean      @default(false)
   organization    Organization @relation(fields: [organizationId], references: [id])
   settlements     Settlement[]
+  revenuePayouts  RevenuePayout[]
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 }
@@ -332,6 +450,7 @@ model Transaction {
   retryJobs               RetryJob[]
   payoutCoordinations     PayoutCoordination[]
   meteringLedger          OrchestrationMeteringLedger[]
+  treasuryLedgerEntries   TreasuryLedgerEntry[]
   createdAt               DateTime                      @default(now())
   updatedAt               DateTime                      @updatedAt
   deletedAt               DateTime?
@@ -413,6 +532,78 @@ model PayoutCoordination {
   updatedAt            DateTime                 @updatedAt
 
   @@index([transactionId, status])
+  @@index([provider, status])
+}
+
+model TreasuryLedgerEntry {
+  id                  String                   @id @default(cuid())
+  entryType           TreasuryLedgerEntryType
+  direction           TreasuryLedgerDirection
+  status              TreasuryLedgerStatus     @default(AVAILABLE)
+  currency            String
+  amount              Decimal                  @db.Decimal(18, 2)
+  sourceTransactionId String?
+  sourceWithdrawalId  String?
+  reference           String                   @unique
+  description         String?
+  metadata            Json?
+  transaction         Transaction?             @relation(fields: [sourceTransactionId], references: [id])
+  withdrawal          TreasuryWithdrawal?      @relation(fields: [sourceWithdrawalId], references: [id])
+  createdAt           DateTime                 @default(now())
+
+  @@unique([sourceTransactionId, entryType])
+  @@index([currency, status, createdAt])
+  @@index([entryType, createdAt])
+  @@index([sourceWithdrawalId])
+}
+
+model TreasuryWithdrawal {
+  id              String                    @id @default(cuid())
+  amount          Decimal                   @db.Decimal(18, 2)
+  currency        String
+  status          TreasuryWithdrawalStatus  @default(DRAFT)
+  provider        GatewayProvider?
+  destinationType String
+  destinationRef  String
+  idempotencyKey  String                    @unique
+  attempts        Int                       @default(0)
+  providerReference String?
+  requestedBy     String?
+  approvedBy      String?
+  processedAt     DateTime?
+  failureReason   String?
+  requestPayload  Json?
+  responsePayload Json?
+  metadata        Json?
+  ledgerEntries   TreasuryLedgerEntry[]
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  @@index([currency, status, createdAt])
+  @@index([provider, status])
+}
+
+model RevenuePayout {
+  id                  String              @id @default(cuid())
+  organizationId      String
+  payoutDestinationId String?
+  provider            GatewayProvider
+  amount              Decimal             @db.Decimal(18, 2)
+  currency            String
+  status              RevenuePayoutStatus @default(PENDING)
+  idempotencyKey      String              @unique
+  attempts            Int                 @default(0)
+  nextRunAt           DateTime?
+  requestPayload      Json?
+  responsePayload     Json?
+  failureReason       String?
+  metadata            Json?
+  organization        Organization        @relation(fields: [organizationId], references: [id])
+  payoutDestination   PayoutDestination?  @relation(fields: [payoutDestinationId], references: [id])
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  @@index([organizationId, status])
   @@index([provider, status])
 }
 
@@ -529,4 +720,3 @@ model CreditPurchaseIntent {
   @@index([transactionId])
   @@index([externalReference])
 }
-

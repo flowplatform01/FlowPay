@@ -21,6 +21,9 @@ export function calculateFees({
 
   const percentageFee = normalize((baseAmount * percentageRate) / 100);
   const platformFee = normalize(flatAmount + percentageFee);
+  // gateway* fields are FlowPay's configured route-pricing layer for a provider
+  // route. They are not a live pass-through estimate of the external provider's
+  // own commercial charges.
   const gatewayPercentageFee = normalize((baseAmount * gatewayPercentageRate) / 100);
   const gatewayFeeAmount = normalize(gatewayFlatAmount + gatewayPercentageFee);
 

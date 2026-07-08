@@ -86,6 +86,7 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
     const signature =
       request.headers["x-flowpay-signature"]?.toString() ??
       request.headers["x-campay-signature"]?.toString() ??
+      request.headers["x-wh-secret"]?.toString() ??
       request.headers["x-signature"]?.toString();
     const requestId = resolveWebhookRequestId({
       headers: request.headers,
@@ -169,6 +170,7 @@ function resolveWebhookRequestId(input: {
   const headerRequestId =
     input.headers["x-flowpay-event-id"]?.toString() ??
     input.headers["x-campay-reference"]?.toString() ??
+    input.headers["x-fapshi-trans-id"]?.toString() ??
     input.headers["x-request-id"]?.toString();
 
   if (headerRequestId) {
@@ -177,10 +179,12 @@ function resolveWebhookRequestId(input: {
 
   const reference = firstString([
     input.body.reference,
+    input.body.transId,
     input.body.transaction_id,
     input.body.transactionId,
     input.body.payment_token,
     input.body.cpm_reference,
+    input.body.externalId,
     input.body.external_reference,
     input.body.externalReference,
     input.body.order_id

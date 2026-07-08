@@ -13,7 +13,9 @@ export const createAppSchema = z.object({
   mode2MeteringEnabled: z.boolean().optional(),
   destinationProfileProvisioningEnabled: z.boolean().optional(),
   destinationProfileAutoVerifyEnabled: z.boolean().optional(),
-  destinationProfileLimit: z.number().int().nonnegative().max(10000).optional()
+  destinationProfileLimit: z.number().int().nonnegative().max(10000).optional(),
+  recipientVerificationPaymentEnabled: z.boolean().optional(),
+  recipientVerificationAmountXaf: z.number().positive().optional()
 });
 
 export const updateAppSchema = z.object({
@@ -26,7 +28,9 @@ export const updateAppSchema = z.object({
   mode2MeteringEnabled: z.boolean().optional(),
   destinationProfileProvisioningEnabled: z.boolean().optional(),
   destinationProfileAutoVerifyEnabled: z.boolean().optional(),
-  destinationProfileLimit: z.number().int().nonnegative().max(10000).optional()
+  destinationProfileLimit: z.number().int().nonnegative().max(10000).optional(),
+  recipientVerificationPaymentEnabled: z.boolean().optional(),
+  recipientVerificationAmountXaf: z.number().positive().optional()
 });
 
 export const topUpAppCreditsSchema = z

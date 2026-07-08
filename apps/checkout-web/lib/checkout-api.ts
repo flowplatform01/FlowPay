@@ -13,6 +13,7 @@ export type CheckoutSession = {
   customerName: string | null;
   organizationName: string;
   status: string;
+  failureReason?: string | null;
   recipientName?: string | null;
   recipientAccount?: string | null;
   paymentDescription?: string | null;
@@ -22,9 +23,19 @@ export type CheckoutSession = {
     label: string;
     type: string;
     fee: number;
+    available?: boolean;
+    unavailableReason?: string;
   }>;
   canConfirm: boolean;
   isCreditPurchase?: boolean;
+  confirmationGatewayWorkflow?: string | null;
+  creditTopUp?: {
+    workflow: "CREDIT_TOPUP";
+    purchaseAmountXaf: number;
+    currentEffectiveBalance: number;
+    projectedEffectiveBalance: number;
+    posture: string;
+  };
 };
 
 export type ConfirmCheckoutResponse = CheckoutSession & {

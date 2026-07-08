@@ -2,6 +2,17 @@ import { prisma } from "../../config/db.js";
 import { generateOpaqueKey } from "../../utils/crypto.js";
 import { recordAuditEvent } from "../audit/audit.service.js";
 import { env } from "../../config/env.js";
+import { normalizePhoneNumber } from "../../utils/phone.js";
+import {
+  serializeRecipientConfirmationSession,
+  validateEditablePayoutTarget
+} from "../confirmation-gateway/confirmation-gateway.service.js";
+import {
+  assertRecipientCapacityEligible,
+  CapacityEligibilityError,
+  evaluateCapacityEligibility,
+  serializeCapacityEligibilityForConsumer
+} from "../capacity-policy/capacity-policy.service.js";
 
 const TOKEN_EXPIRY_HOURS = 24;
 
@@ -66,7 +77,7 @@ export async function getRecipientConfirmationSession(
     where: { id: destinationProfileId },
     include: {
       app: {
-        select: { name: true, slug: true }
+        select: { id: true, name: true, slug: true }
       },
       organization: {
         select: { name: true, slug: true }
@@ -89,18 +100,53 @@ export async function getRecipientConfirmationSession(
     throw new Error("Confirmation token has expired");
   }
 
-  return profile;
+  const eligibility = await evaluateCapacityEligibility({
+    appId: profile.appId,
+    resourceType: "RECIPIENT",
+    excludeProfileId: profile.id
+  });
+
+  return {
+    ...serializeRecipientConfirmationSession(profile),
+    capacityEligibility: serializeCapacityEligibilityForConsumer(eligibility)
+  };
 }
 
 export async function approveRecipientConfirmation(
   destinationProfileId: string,
-  token: string
+  token: string,
+  input: { payoutTarget?: string } = {}
 ) {
+  const profileRecord = await prisma.destinationProfile.findUniqueOrThrow({
+    where: { id: destinationProfileId },
+    select: { appId: true, confirmationToken: true, confirmationTokenExpiresAt: true }
+  });
+
   const session = await getRecipientConfirmationSession(destinationProfileId, token);
+
+  if (!session.capacityEligibility.canActivate) {
+    throw new CapacityEligibilityError(
+      session.capacityEligibility.reasons[0] ?? "Recipient activation requirements are not met.",
+      409
+    );
+  }
+
+  await assertRecipientCapacityEligible({
+    appId: profileRecord.appId,
+    excludeProfileId: destinationProfileId,
+    forActivation: true
+  });
+
+  let payoutTarget = session.payoutTarget;
+  if (input.payoutTarget !== undefined) {
+    const validated = validateEditablePayoutTarget(input.payoutTarget);
+    payoutTarget = normalizePhoneNumber(validated) ?? validated;
+  }
 
   const profile = await prisma.destinationProfile.update({
     where: { id: destinationProfileId },
     data: {
+      payoutTarget,
       verificationStatus: "VERIFIED",
       confirmationToken: null,
       confirmationTokenExpiresAt: null
@@ -114,7 +160,8 @@ export async function approveRecipientConfirmation(
     entityId: destinationProfileId,
     payload: {
       externalRecipientId: profile.externalRecipientId,
-      payoutTarget: profile.payoutTarget
+      payoutTarget: profile.payoutTarget,
+      payoutTargetCorrected: payoutTarget !== session.payoutTarget
     }
   });
 
@@ -123,9 +170,10 @@ export async function approveRecipientConfirmation(
 
 export async function rejectRecipientConfirmation(
   destinationProfileId: string,
-  token: string
+  token: string,
+  input: { reason?: string } = {}
 ) {
-  const session = await getRecipientConfirmationSession(destinationProfileId, token);
+  await getRecipientConfirmationSession(destinationProfileId, token);
 
   const profile = await prisma.destinationProfile.update({
     where: { id: destinationProfileId },
@@ -142,7 +190,8 @@ export async function rejectRecipientConfirmation(
     entityType: "DestinationProfile",
     entityId: destinationProfileId,
     payload: {
-      externalRecipientId: profile.externalRecipientId
+      externalRecipientId: profile.externalRecipientId,
+      reason: input.reason ?? null
     }
   });
 

@@ -4,6 +4,7 @@ import { createTransactionSchema } from "./transactions.schema.js";
 import {
   createTransaction,
   enqueueTransactionRetry,
+  expireStalePendingCheckoutTransactions,
   getDashboardSummary,
   getTransactionById,
   listTransactions,
@@ -11,7 +12,7 @@ import {
 } from "./transactions.service.js";
 import { verifyAppSecretKey } from "../auth/app-auth.guard.js";
 import { verifyInternalService } from "../auth/internal-auth.guard.js";
-import { resolveProviderFromPaymentMethod } from "../payments/payment-channels.js";
+import { resolveOperationalProviderFromPaymentMethod } from "../payments/payment-channels.js";
 import { confirmCheckoutSchema, checkoutSessionQuerySchema } from "../checkout/checkout.schema.js";
 import {
   buildHostedCheckoutUrl,
@@ -19,10 +20,12 @@ import {
   readTransactionMetadata,
   refreshCheckoutSessionState,
   serializeCheckoutSession,
+  enrichCheckoutSession,
   verifyCheckoutSessionToken
 } from "../checkout/checkout.service.js";
 import type { PaymentMethodId } from "../payments/payment-channels.js";
 import { reconcileTransaction } from "./reconciliation.service.js";
+import { FeeRangeMatchError } from "../fees/fee-rule.resolver.js";
 
 export async function registerTransactionRoutes(app: FastifyInstance) {
   app.get("/internal/transactions", { preHandler: [verifyInternalService] }, async () =>
@@ -48,6 +51,17 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as { note?: string };
     return reply.send(await markTransactionUnderReview(id, body.note));
+  });
+
+  app.post("/internal/transactions/stale-pending/expire", { preHandler: [verifyInternalService] }, async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      olderThanMinutes?: number;
+      limit?: number;
+      dryRun?: boolean;
+      reason?: string;
+    };
+
+    return reply.send(await expireStalePendingCheckoutTransactions(body));
   });
 
   app.post("/internal/transactions/:id/retry", { preHandler: [verifyInternalService] }, async (request, reply) => {
@@ -94,7 +108,9 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
     try {
       const provider =
         parsed.data.provider ??
-        resolveProviderFromPaymentMethod(parsed.data.paymentMethod as string);
+        await resolveOperationalProviderFromPaymentMethod(parsed.data.paymentMethod as string, {
+          appProviderAccesses: request.appAuth.appProfile?.providerAccesses
+        });
 
       const transaction = await createTransaction({
         appId: request.appAuth.appId,
@@ -127,6 +143,12 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
           : null
       });
     } catch (error) {
+      if (error instanceof FeeRangeMatchError) {
+        return reply.code(422).send({
+          message: error.message
+        });
+      }
+
       if (isTemporaryDatabaseError(error)) {
         return reply.code(503).send({
           statusCode: 503,
@@ -162,7 +184,7 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
 
     const refreshedTransaction = await refreshCheckoutSessionState(transaction);
 
-    return serializeCheckoutSession(refreshedTransaction);
+    return enrichCheckoutSession(refreshedTransaction);
   });
 
   app.get("/checkout/session/:id/events", async (request, reply) => {
@@ -230,7 +252,7 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
         }
 
         const refreshedTransaction = await refreshCheckoutSessionState(latestTransaction);
-        const payload = serializeCheckoutSession(refreshedTransaction);
+        const payload = await enrichCheckoutSession(refreshedTransaction);
 
         reply.raw.write(`event: status\ndata: ${JSON.stringify(payload)}\n\n`);
 
@@ -279,7 +301,7 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
       });
 
       return reply.send({
-        ...serializeCheckoutSession(transaction),
+        ...(await enrichCheckoutSession(transaction)),
         message:
           transaction.status === "SUCCEEDED"
             ? "Payment completed successfully"

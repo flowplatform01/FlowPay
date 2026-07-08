@@ -1,5 +1,7 @@
 import type { GatewayProvider, Prisma } from "@prisma/client";
 import { prisma } from "../../config/db.js";
+import { env } from "../../config/env.js";
+import { getGatewayBalance } from "../gateways/gateways.service.js";
 import { mergeProviderCapabilities, providerHealthScore } from "./provider-registry.js";
 
 const providerInclude = {
@@ -54,11 +56,13 @@ export async function updateProviderConfig(
       ...(input.capabilities ? { capabilities: input.capabilities } : {})
     } satisfies Prisma.InputJsonObject;
 
+    const baseUrl = resolveProviderBaseUrl(provider, input);
+
     const config = await tx.gatewayConfig.update({
       where: { provider },
       data: {
         isEnabled: input.isEnabled,
-        baseUrl: input.baseUrl,
+        baseUrl,
         displayName: input.displayName,
         metadata
       },
@@ -115,6 +119,20 @@ export async function updateProviderConfig(
   });
 }
 
+function resolveProviderBaseUrl(
+  provider: GatewayProvider,
+  input: {
+    baseUrl?: string;
+    mode?: "sandbox" | "live";
+  }
+) {
+  if (provider === "FAPSHI" && input.mode) {
+    return input.mode === "live" ? env.FAPSHI_LIVE_BASE_URL : env.FAPSHI_SANDBOX_BASE_URL;
+  }
+
+  return input.baseUrl;
+}
+
 export async function listProviderCapabilities() {
   const providers = await listProviderConfigs();
   return providers.map((provider) => ({
@@ -126,6 +144,27 @@ export async function listProviderCapabilities() {
     healthStatus: provider.health?.status ?? "unknown",
     latencyMs: provider.health?.latencyMs ?? null
   }));
+}
+
+export async function readProviderBalance(provider: GatewayProvider) {
+  const config = await prisma.gatewayConfig.findUnique({
+    where: { provider },
+    select: {
+      provider: true,
+      displayName: true,
+      isEnabled: true
+    }
+  });
+
+  if (!config) {
+    throw new Error("Provider configuration was not found");
+  }
+
+  const balance = await getGatewayBalance(provider);
+  return {
+    ...config,
+    balance
+  };
 }
 
 function asRecord(value: unknown) {

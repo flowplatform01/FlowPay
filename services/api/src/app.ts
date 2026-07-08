@@ -13,6 +13,10 @@ import { registerOrganizationRoutes } from "./modules/organizations/organization
 import { registerProviderRoutes } from "./modules/providers/providers.routes.js";
 import { registerDestinationProfileRoutes } from "./modules/destination-profiles/destination-profiles.routes.js";
 import { registerCreditRoutes } from "./modules/credits/credits.routes.js";
+import { registerCapacityPolicyRoutes } from "./modules/capacity-policy/capacity-policy.routes.js";
+import { registerFeeRoutes } from "./modules/fees/fee-rules.routes.js";
+import { registerRevenuePayoutRoutes } from "./modules/revenue-payouts/revenue-payouts.routes.js";
+import { registerTreasuryRoutes } from "./modules/treasury/treasury.routes.js";
 
 export async function buildApp() {
   const app = Fastify({
@@ -65,6 +69,10 @@ export async function buildApp() {
     await registerWebhookRoutes(instance);
     await registerMonitoringRoutes(instance);
     await registerCreditRoutes(instance);
+    await registerCapacityPolicyRoutes(instance);
+    await registerFeeRoutes(instance);
+    await registerRevenuePayoutRoutes(instance);
+    await registerTreasuryRoutes(instance);
   }, { prefix: "/api/v1" });
 
   return app;

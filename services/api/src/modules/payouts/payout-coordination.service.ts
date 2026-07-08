@@ -1,6 +1,7 @@
-import { Prisma, type PayoutCoordinationStatus } from "@prisma/client";
+import { Prisma, type GatewayProvider, type PayoutCoordinationStatus } from "@prisma/client";
 import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { getGatewayAdapter } from "../gateways/gateways.service.js";
+import type { GatewayPayoutResult } from "../gateways/gateway.types.js";
 
 type CoordinationForProcessing = Prisma.PayoutCoordinationGetPayload<{
   include: {
@@ -85,17 +86,6 @@ export async function processPayoutCoordination(id: string) {
     throw new Error("Validated payout coordination is missing destination profile");
   }
 
-  const adapter = getGatewayAdapter(coordination.provider);
-  if (!adapter.executePayout) {
-    const reason = `${coordination.provider} adapter does not support payout execution; operator payout action is required`;
-    await failCoordination(coordination.id, reason, {
-      provider: coordination.provider,
-      destinationProfileId: destinationProfile.id,
-      payoutTarget: maskPayoutTarget(destinationProfile.payoutTarget)
-    });
-    return { processed: true, status: "FAILED" as PayoutCoordinationStatus, reason };
-  }
-
   const claimed = await prisma.payoutCoordination.updateMany({
     where: {
       id: coordination.id,
@@ -113,31 +103,81 @@ export async function processPayoutCoordination(id: string) {
   }
 
   try {
-    const result = await adapter.executePayout({
-      transactionId: coordination.transactionId,
-      payoutCoordinationId: coordination.id,
-      destinationProfileId: destinationProfile.id,
-      payoutTarget: destinationProfile.payoutTarget,
-      amount: Number(coordination.transaction.settlementAmount),
-      currency: coordination.transaction.currency,
-      idempotencyKey: coordination.idempotencyKey,
-      metadata: {
-        externalRecipientId: destinationProfile.externalRecipientId,
-        settlementStrategy: destinationProfile.settlementStrategy
+    const attemptedProviders: Array<Record<string, unknown>> = [];
+    const providerCandidates = resolvePayoutProviderCandidates(coordination);
+    let selectedProvider: GatewayProvider | null = null;
+    let result: GatewayPayoutResult | null = null;
+
+    for (const candidate of providerCandidates) {
+      const adapter = getGatewayAdapter(candidate);
+
+      if (!adapter.executePayout) {
+        attemptedProviders.push({
+          provider: candidate,
+          status: "SKIPPED",
+          reason: "Adapter does not support payout execution"
+        });
+        continue;
       }
-    });
+
+      const candidateResult = await adapter.executePayout({
+        transactionId: coordination.transactionId,
+        payoutCoordinationId: coordination.id,
+        destinationProfileId: destinationProfile.id,
+        payoutTarget: destinationProfile.payoutTarget,
+        amount: Number(coordination.transaction.settlementAmount),
+        currency: coordination.transaction.currency,
+        idempotencyKey: `${coordination.idempotencyKey}:${candidate}`,
+        metadata: {
+          externalRecipientId: destinationProfile.externalRecipientId,
+          settlementStrategy: destinationProfile.settlementStrategy,
+          primaryProvider: coordination.provider,
+          attemptedProvider: candidate,
+          fallbackUsed: candidate !== coordination.provider
+        }
+      });
+
+      attemptedProviders.push({
+        provider: candidate,
+        status: candidateResult.status,
+        providerReference: candidateResult.providerReference
+      });
+
+      selectedProvider = candidate;
+      result = candidateResult;
+
+      if (candidateResult.status !== "FAILED") {
+        break;
+      }
+    }
+
+    if (!result || !selectedProvider) {
+      const reason = "No configured provider can execute this payout; operator payout action is required";
+      await failCoordination(coordination.id, reason, {
+        primaryProvider: coordination.provider,
+        attemptedProviders,
+        destinationProfileId: destinationProfile.id,
+        payoutTarget: maskPayoutTarget(destinationProfile.payoutTarget)
+      });
+      return { processed: true, status: "FAILED" as PayoutCoordinationStatus, reason };
+    }
 
     const nextStatus = mapPayoutStatus(result.status);
+    const retryable = nextStatus === "FAILED" && coordination.attempts + 1 < 6;
 
     await prisma.$transaction(
       async (tx) => {
         await tx.payoutCoordination.update({
           where: { id: coordination.id },
           data: {
+            provider: selectedProvider,
             status: nextStatus,
             responsePayload: result.raw as Prisma.InputJsonValue,
             failureReason: nextStatus === "FAILED" ? "Provider payout execution failed" : null,
-            nextRunAt: nextStatus === "PENDING" ? nextPayoutAttemptAt(coordination.attempts + 1) : null
+            nextRunAt:
+              nextStatus === "PENDING" || retryable
+                ? nextPayoutAttemptAt(coordination.attempts + 1)
+                : null
           }
         });
 
@@ -157,7 +197,10 @@ export async function processPayoutCoordination(id: string) {
             eventType: `payout_coordination.${nextStatus.toLowerCase()}`,
             payload: {
               payoutCoordinationId: coordination.id,
-              provider: coordination.provider,
+              provider: selectedProvider,
+              primaryProvider: coordination.provider,
+              fallbackUsed: selectedProvider !== coordination.provider,
+              attemptedProviders,
               providerReference: result.providerReference,
               response: result.raw
             } as Prisma.InputJsonValue
@@ -171,7 +214,9 @@ export async function processPayoutCoordination(id: string) {
             entityType: "PayoutCoordination",
             entityId: coordination.id,
             payload: {
-              provider: coordination.provider,
+              provider: selectedProvider,
+              primaryProvider: coordination.provider,
+              fallbackUsed: selectedProvider !== coordination.provider,
               status: nextStatus,
               transactionId: coordination.transactionId
             }
@@ -236,6 +281,34 @@ function mapPayoutStatus(status: "PENDING" | "SUCCESS" | "FAILED"): PayoutCoordi
   return "PENDING";
 }
 
+function resolvePayoutProviderCandidates(coordination: CoordinationForProcessing) {
+  const primary = coordination.provider;
+  const preferences = asRecord(coordination.destinationProfile?.routingPreferences);
+  const fallbackEnabled =
+    preferences.payoutFallbackEnabled === true ||
+    preferences.allowPayoutFallbackProviders === true ||
+    preferences.fallbackEnabled === true;
+
+  if (!fallbackEnabled) {
+    return [primary];
+  }
+
+  const fallbackProviders = Array.isArray(preferences.fallbackProviders)
+    ? preferences.fallbackProviders
+    : Array.isArray(preferences.payoutFallbackProviders)
+      ? preferences.payoutFallbackProviders
+      : [];
+
+  const candidates = [primary];
+  for (const provider of fallbackProviders) {
+    if (isGatewayProvider(provider) && !candidates.includes(provider)) {
+      candidates.push(provider);
+    }
+  }
+
+  return candidates;
+}
+
 function nextPayoutAttemptAt(attempts: number) {
   return new Date(Date.now() + Math.min(attempts * 60_000, 15 * 60_000));
 }
@@ -294,3 +367,24 @@ function maskPayoutTarget(value: string) {
 function formatErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
+
+function asRecord(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  return {};
+}
+
+function isGatewayProvider(value: unknown): value is GatewayProvider {
+  return typeof value === "string" && gatewayProviders.has(value as GatewayProvider);
+}
+
+const gatewayProviders = new Set<GatewayProvider>([
+  "CAMPAY",
+  "FAPSHI",
+  "MAVIANCE",
+  "CINETPAY",
+  "FLUTTERWAVE",
+  "MONETBIL"
+]);

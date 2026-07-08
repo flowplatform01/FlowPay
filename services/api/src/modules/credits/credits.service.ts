@@ -214,6 +214,7 @@ export async function initiateCreditPurchase(
       customerName: input.customerName,
       metadata: {
         __flowpay_credit_purchase: true,
+        __flowpay_confirmation_gateway: "CREDIT_TOPUP",
         purchaseIntentId: purchase.id,
         appId
       }

@@ -38,6 +38,8 @@ type CheckoutClientProps = {
   embed?: boolean;
 };
 
+type CheckoutPaymentMethod = CheckoutSession["paymentMethods"][number];
+
 const shellClass = (embed: boolean) =>
   embed
     ? "flex min-h-full h-full flex-col items-center bg-surface-50 p-3"
@@ -111,7 +113,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
     try {
       const data = await fetchCheckoutSession(transactionId, sessionToken);
       setSessionData(data);
-      setSelectedMethod(data.paymentMethod || "MTN_MOMO");
+      setSelectedMethod(selectAvailableMethod(data));
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Unable to load checkout session");
@@ -136,11 +138,11 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
       try {
         const latest = JSON.parse(event.data) as CheckoutSession;
         setSessionData(latest);
-        setSelectedMethod(latest.paymentMethod || "MTN_MOMO");
+        setSelectedMethod((current) => selectAvailableMethod(latest, current));
         setStatusNotice(null);
 
         if (latest.status === "FAILED") {
-          setFailureMessage("Payment could not be completed.");
+          setFailureMessage(latest.failureReason ?? "Payment could not be completed.");
         }
       } catch {
         setStatusNotice("Live payment updates are temporarily unavailable. Status polling is still active.");
@@ -175,7 +177,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
           ? "Payment confirmed."
           : sessionData.status === "UNDER_REVIEW"
             ? "Payment is being reviewed."
-          : failureMessage ?? "Payment could not be completed."
+          : failureMessage ?? sessionData.failureReason ?? "Payment could not be completed."
     });
   }, [failureMessage, postCheckoutStatus, sessionData]);
 
@@ -194,7 +196,11 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
           if (cancelled) return;
 
           setSessionData(latest);
+          setSelectedMethod((current) => selectAvailableMethod(latest, current));
           setStatusNotice(null);
+          if (latest.status === "FAILED") {
+            setFailureMessage(latest.failureReason ?? "Payment could not be completed.");
+          }
 
           if (isTerminalStatus(latest.status)) {
             return;
@@ -220,16 +226,24 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
     };
   }, [isProcessing, sessionData?.status, sessionToken, transactionId]);
 
-  const paymentMethods = sessionData?.paymentMethods?.length
+  const paymentMethods: CheckoutPaymentMethod[] = sessionData?.paymentMethods?.length
     ? sessionData.paymentMethods
     : PAYMENT_METHODS.map((method) => ({
         id: method.id,
         label: method.label,
         type: method.type,
-        fee: method.fee
+        fee: method.fee,
+        available: true,
+        unavailableReason: undefined
       }));
-  const activeMethod =
-    paymentMethods.find((method) => method.id === selectedMethod) ?? getPaymentMethod(selectedMethod);
+  const fallbackMethod = getPaymentMethod(selectedMethod);
+  const activeMethod: CheckoutPaymentMethod =
+    paymentMethods.find((method) => method.id === selectedMethod) ?? {
+      ...fallbackMethod,
+      available: true,
+      unavailableReason: undefined
+    };
+  const activeMethodAvailable = activeMethod.available !== false;
   const amount = sessionData?.amount ?? 0;
   const platformFee = sessionData?.platformFeeAmount ?? 0;
   const gatewayFee = sessionData?.gatewayFeeAmount ?? 0;
@@ -239,16 +253,27 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
   const isSuccess = status === "SUCCEEDED";
   const isReview = status === "UNDER_REVIEW";
   const isFailed = ["FAILED", "CANCELLED", "EXPIRED"].includes(status) || Boolean(failureMessage);
+  const visibleFailureMessage = failureMessage ?? sessionData?.failureReason ?? null;
   const isAwaitingConfirmation = status === "PROCESSING";
   const hasRecipientContext = Boolean(sessionData?.recipientName || sessionData?.recipientAccount);
 
-  const canSubmit = useMemo(
-    () => sessionData?.canConfirm && !isProcessing && !isAwaitingConfirmation && !isSuccess && !isFailed,
+  const canInteract = useMemo(
+    () =>
+      Boolean(sessionData?.canConfirm) &&
+      !isProcessing &&
+      !isAwaitingConfirmation &&
+      !isSuccess &&
+      !isFailed,
     [sessionData?.canConfirm, isProcessing, isAwaitingConfirmation, isSuccess, isFailed]
   );
+  const canSubmit = canInteract && activeMethodAvailable;
 
   const handlePay = async () => {
     if (!sessionToken || !transactionId) return;
+    if (!activeMethodAvailable) {
+      setStatusNotice(activeMethod.unavailableReason ?? "This payment method is currently unavailable.");
+      return;
+    }
 
     setIsProcessing(true);
     setFailureMessage(null);
@@ -261,7 +286,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
       let finalSession: CheckoutSession = result;
 
       if (result.status === "FAILED") {
-        setFailureMessage(result.message || "Payment could not be completed.");
+        setFailureMessage(result.failureReason || result.message || "Payment could not be completed.");
       }
 
       if (result.status === "PROCESSING") {
@@ -281,7 +306,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
             : finalSession.status === "UNDER_REVIEW"
               ? "Payment is being reviewed."
             : finalSession.status === "FAILED"
-              ? "Payment could not be completed."
+              ? finalSession.failureReason ?? "Payment could not be completed."
               : "Payment is still waiting for confirmation."
       });
     } catch (err: unknown) {
@@ -376,7 +401,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
           </div>
           <h1 className="mt-6 text-2xl font-bold text-surface-900">Payment Failed</h1>
           <p className="mt-2 text-sm text-surface-500">
-            {failureMessage ?? "This payment could not be completed. Please try again from the merchant app."}
+            {visibleFailureMessage ?? "This payment could not be completed. Please try again from the merchant app."}
           </p>
         </motion.div>
       </main>
@@ -494,34 +519,72 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
               </div>
             </div>
 
+            {sessionData.creditTopUp ? (
+              <div className="mb-4 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
+                <div className="text-xs font-bold uppercase tracking-wider text-indigo-700">Credit balance preview</div>
+                <div className="mt-2 grid gap-2 text-sm sm:grid-cols-3">
+                  <CheckoutContextItem
+                    label="Current"
+                    value={`${sessionData.creditTopUp.currentEffectiveBalance.toLocaleString()} credits`}
+                  />
+                  <CheckoutContextItem
+                    label="Purchase"
+                    value={`+${sessionData.creditTopUp.purchaseAmountXaf.toLocaleString()}`}
+                  />
+                  <CheckoutContextItem
+                    label="After payment"
+                    value={`${sessionData.creditTopUp.projectedEffectiveBalance.toLocaleString()} credits`}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-indigo-700/80">
+                  Credits apply after successful settlement (1 XAF received = 1 credit).
+                </p>
+              </div>
+            ) : null}
+
             <div className="mb-3 text-sm font-bold text-surface-900">Payment Method</div>
             <div className="space-y-2">
               {paymentMethods.map((method) => {
                 const isActive = selectedMethod === method.id;
                 const Icon = methodIcons[method.id as PaymentMethodId] ?? Smartphone;
+                const isAvailable = method.available !== false;
+                const canSelectMethod = canInteract && isAvailable;
                 return (
                   <motion.div
                     key={method.id}
                     layout
-                    whileTap={canSubmit ? { scale: 0.98 } : {}}
-                    onClick={() => canSubmit && setSelectedMethod(method.id)}
-                    className={`flex cursor-pointer items-center justify-between rounded-xl border-2 p-3 transition-all ${
+                    whileTap={canSelectMethod ? { scale: 0.98 } : {}}
+                    onClick={() => canSelectMethod && setSelectedMethod(method.id)}
+                    className={`flex items-center justify-between rounded-xl border-2 p-3 transition-all ${
                       isActive
                         ? "border-brand-600 bg-brand-50/50 ring-2 ring-brand-100"
-                        : "border-surface-100 hover:border-surface-200"
-                    } ${!canSubmit ? "pointer-events-none opacity-60" : ""}`}
+                        : isAvailable
+                          ? "border-surface-100 hover:border-surface-200"
+                          : "border-surface-100 bg-surface-50"
+                    } ${canSelectMethod ? "cursor-pointer" : "cursor-not-allowed"} ${!isAvailable ? "opacity-55 grayscale" : ""} ${
+                      !canSubmit && isAvailable ? "pointer-events-none opacity-60" : ""
+                    }`}
                   >
                     <div className="flex items-center gap-3">
                       <div
                         className={`flex h-9 w-9 items-center justify-center rounded-lg ${
-                          isActive ? "bg-brand-600 text-white" : "bg-surface-100 text-surface-500"
+                          isActive && isAvailable ? "bg-brand-600 text-white" : "bg-surface-100 text-surface-500"
                         }`}
                       >
                         <Icon size={18} />
                       </div>
                       <div>
-                        <div className="text-sm font-bold text-surface-900">{method.label}</div>
-                        <div className="text-[10px] font-medium text-surface-500">{method.type}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-sm font-bold text-surface-900">{method.label}</div>
+                          {!isAvailable ? (
+                            <span className="rounded-full border border-surface-200 bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-surface-500">
+                              Unavailable
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="text-[10px] font-medium text-surface-500">
+                          {isAvailable ? method.type : method.unavailableReason ?? "Currently inactive"}
+                        </div>
                       </div>
                     </div>
                     {method.fee > 0 ? (
@@ -577,6 +640,8 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
               <p className="mt-3 text-center text-xs font-medium text-surface-500">
                 {statusNotice ?? "Keep this sheet open while the payment is confirmed."}
               </p>
+            ) : statusNotice ? (
+              <p className="mt-3 text-center text-xs font-medium text-surface-500">{statusNotice}</p>
             ) : null}
           </div>
         </motion.div>
@@ -592,6 +657,19 @@ function CheckoutContextItem({ label, value }: { label: string; value: string })
       <div className="mt-0.5 truncate font-medium text-surface-800">{value}</div>
     </div>
   );
+}
+
+function selectAvailableMethod(session: CheckoutSession, current?: PaymentMethodId): PaymentMethodId {
+  const methods = session.paymentMethods ?? [];
+  if (current && methods.some((method) => method.id === current && method.available !== false)) {
+    return current;
+  }
+
+  if (methods.some((method) => method.id === session.paymentMethod && method.available !== false)) {
+    return session.paymentMethod;
+  }
+
+  return methods.find((method) => method.available !== false)?.id ?? session.paymentMethod ?? "MTN_MOMO";
 }
 
 function pollingDelayForAttempt(attempt: number) {

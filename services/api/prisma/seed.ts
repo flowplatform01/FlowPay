@@ -13,6 +13,15 @@ function hashSecret(secret: string) {
 function providerCapabilities(provider: GatewayProvider) {
   const capabilities: Record<GatewayProvider, string[]> = {
     [GatewayProvider.CAMPAY]: ["LOCAL_MOMO_COLLECTION", "MTN_COLLECTION", "ORANGE_COLLECTION", "CAMEROON_ROUTING"],
+    [GatewayProvider.FAPSHI]: [
+      "LOCAL_MOMO_COLLECTION",
+      "MTN_COLLECTION",
+      "ORANGE_COLLECTION",
+      "CAMEROON_ROUTING",
+      "REGIONAL_DISBURSEMENT",
+      "MOBILE_FIRST_COLLECTION",
+      "MOBILE_MONEY_PAYOUT"
+    ],
     [GatewayProvider.MAVIANCE]: [
       "BANK_RAILS",
       "GIMAC_INTEROPERABILITY",
@@ -125,6 +134,7 @@ async function main() {
 
   const gatewayProviders = [
     GatewayProvider.CAMPAY,
+    GatewayProvider.FAPSHI,
     GatewayProvider.MAVIANCE,
     GatewayProvider.CINETPAY,
     GatewayProvider.FLUTTERWAVE,
@@ -169,6 +179,8 @@ async function main() {
     const sandboxBaseUrl =
       provider === GatewayProvider.CAMPAY
         ? "https://demo.campay.net"
+        : provider === GatewayProvider.FAPSHI
+          ? "https://live.fapshi.com"
         : provider === GatewayProvider.CINETPAY
           ? "https://api-checkout.cinetpay.com"
           : provider === GatewayProvider.MAVIANCE

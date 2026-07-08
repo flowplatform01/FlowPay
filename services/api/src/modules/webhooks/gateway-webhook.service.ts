@@ -2,6 +2,7 @@ import type { GatewayProvider, Prisma, TransactionStatus } from "@prisma/client"
 import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
+import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
 
 type GatewayProviderValue = GatewayProvider;
 
@@ -85,6 +86,19 @@ export async function processGatewayWebhook(
         settlementStrategy: transaction.settlementStrategy
       });
 
+      if (mappedStatus === "SUCCEEDED") {
+        await recordPlatformFeeCapture(tx, {
+          id: transaction.id,
+          status: mappedStatus,
+          currency: transaction.currency,
+          platformFeeAmount: transaction.platformFeeAmount,
+          externalReference: transaction.externalReference,
+          selectedProvider: transaction.selectedProvider,
+          appId: transaction.appId,
+          organizationId: transaction.organizationId
+        });
+      }
+
       if (
         mappedStatus === "SUCCEEDED" &&
         transaction.orchestrationMode === "MULTI_TENANT" &&
@@ -160,6 +174,15 @@ export async function processGatewayWebhook(
       settlementAmount: transaction.settlementAmount,
       failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null
     });
+
+    const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
+    await maybeFinalizeRecipientVerificationFromTransaction({
+      id: transaction.id,
+      appId: transaction.appId,
+      status: mappedStatus,
+      metadata: transaction.metadata,
+      failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null
+    });
   }
 
   return { processed: true, transactionId: transaction.id, status: mappedStatus };
@@ -168,6 +191,7 @@ export async function processGatewayWebhook(
 function extractProviderReference(provider: GatewayProviderValue, payload: Record<string, unknown>) {
   const candidates = [
     payload.reference,
+    payload.transId,
     payload.transaction_id,
     payload.transactionId,
     payload.payment_token,
@@ -182,6 +206,7 @@ function extractExternalReference(payload: Record<string, unknown>) {
   const candidates = [
     payload.external_reference,
     payload.externalReference,
+    payload.externalId,
     payload.order_id,
     payload.transaction_id
   ];
@@ -224,6 +249,10 @@ function mapProviderStatus(provider: GatewayProviderValue, payload: Record<strin
 
   if (raw.includes("FAIL") || raw.includes("CANCEL") || raw.includes("REJECT")) {
     return "FAILED";
+  }
+
+  if (raw.includes("EXPIRED")) {
+    return "EXPIRED";
   }
 
   if (provider === "CINETPAY" && payload.cpm_error_message) {

@@ -8,12 +8,17 @@ import { getGatewayAdapter } from "../gateways/gateways.service.js";
 import { assertProviderCanAcceptTraffic } from "../providers/provider-registry.js";
 import { reconcileTransaction } from "../transactions/reconciliation.service.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
+import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
 import {
   getPaymentMethodForProvider,
+  listCheckoutPaymentMethods,
   listPublicPaymentMethods,
+  resolveOperationalProviderFromPaymentMethod,
   resolveProviderFromPaymentMethod,
   type PaymentMethodId
 } from "../payments/payment-channels.js";
+import { CONFIRMATION_GATEWAY_WORKFLOWS } from "../confirmation-gateway/confirmation-gateway.types.js";
+import { getCreditBalance } from "../credits/credits.service.js";
 
 type GatewayProviderValue = GatewayProvider;
 
@@ -32,6 +37,7 @@ type TransactionMetadata = {
   transactionNote?: string;
   __flowpay_credit_purchase?: boolean;
   purchaseIntentId?: string;
+  __flowpay_confirmation_gateway?: string;
 };
 
 export function createCheckoutSessionToken() {
@@ -70,6 +76,7 @@ export function serializeCheckoutSession(transaction: {
   currency: string;
   customerName: string | null;
   status: TransactionStatus;
+  failureReason: string | null;
   selectedProvider: GatewayProvider;
   orchestrationMode: string;
   settlementStrategy: string;
@@ -92,14 +99,54 @@ export function serializeCheckoutSession(transaction: {
     customerName: transaction.customerName,
     organizationName: transaction.organization.name,
     status: transaction.status,
+    failureReason: transaction.failureReason,
     recipientName: metadata.recipientName,
     recipientAccount: metadata.recipientAccount,
     paymentDescription: metadata.checkoutDescription ?? metadata.transferPurpose ?? metadata.transactionNote,
     paymentMethod,
-    paymentMethods: listPublicPaymentMethods(),
+    paymentMethods: listPublicPaymentMethods(
+      transaction.externalRecipientId ? transaction.selectedProvider : undefined
+    ),
     canConfirm: ["PENDING", "REQUIRES_ACTION", "PROCESSING"].includes(transaction.status),
-    isCreditPurchase: Boolean(metadata.__flowpay_credit_purchase)
+    isCreditPurchase: Boolean(metadata.__flowpay_credit_purchase),
+    confirmationGatewayWorkflow: metadata.__flowpay_confirmation_gateway ?? null
   };
+}
+
+export async function enrichCheckoutSession(
+  transaction: Parameters<typeof serializeCheckoutSession>[0] & { appId?: string }
+) {
+  const base = {
+    ...serializeCheckoutSession(transaction),
+    paymentMethods: await listCheckoutPaymentMethods(
+      transaction.externalRecipientId ? transaction.selectedProvider : undefined
+    )
+  };
+  const metadata = readTransactionMetadata(transaction.metadata);
+
+  if (!metadata.__flowpay_credit_purchase || !transaction.appId) {
+    return base;
+  }
+
+  try {
+    const balance = await getCreditBalance(transaction.appId);
+    const purchaseAmountXaf = Number(transaction.amount);
+    const projectedEffectiveBalance = balance.effectiveBalance + purchaseAmountXaf;
+
+    return {
+      ...base,
+      confirmationGatewayWorkflow: CONFIRMATION_GATEWAY_WORKFLOWS.CREDIT_TOPUP,
+      creditTopUp: {
+        workflow: CONFIRMATION_GATEWAY_WORKFLOWS.CREDIT_TOPUP,
+        purchaseAmountXaf,
+        currentEffectiveBalance: balance.effectiveBalance,
+        projectedEffectiveBalance,
+        posture: balance.posture
+      }
+    };
+  } catch {
+    return base;
+  }
 }
 
 export async function refreshCheckoutSessionState<T extends {
@@ -192,7 +239,7 @@ export async function confirmHostedCheckout(input: {
     throw new Error(`Payment cannot be completed while status is ${transaction.status}`);
   }
 
-  const paymentMethodProvider = resolveProviderFromPaymentMethod(input.paymentMethod);
+  const paymentMethodProvider = await resolveOperationalProviderFromPaymentMethod(input.paymentMethod);
   const provider = transaction.destinationProfileId ? transaction.selectedProvider : paymentMethodProvider;
 
   if (transaction.destinationProfileId && paymentMethodProvider !== provider) {
@@ -253,21 +300,29 @@ export async function confirmHostedCheckout(input: {
     });
   }
 
+  const chargeInput = {
+    transactionId: transaction.id,
+    provider,
+    paymentMethod: input.paymentMethod
+  };
+
   const { chargeQueue } = await import("../../lib/queues.js");
+  let chargeQueued = false;
+
   if (chargeQueue) {
-    await safeQueueAdd("charge-queue", () =>
-      chargeQueue.add(
-        "execute-charge",
-        {
-          transactionId: transaction.id,
-          provider,
-          paymentMethod: input.paymentMethod
-        },
-        {
-          jobId: `charge:${transaction.id}:${provider}`
-        }
-      )
+    const queueResult = await addQueueJobSafely("charge-queue", () =>
+      chargeQueue.add("execute-charge", chargeInput, {
+        jobId: `charge:${transaction.id}:${provider}`
+      })
     );
+    chargeQueued = queueResult.enqueued;
+  }
+
+  if (!chargeQueued) {
+    console.warn(
+      `[Checkout] Charge queue unavailable for ${transaction.id}; executing capture synchronously`
+    );
+    await executeAsynchronousCharge(chargeInput);
   }
 
   void recordCheckoutLatency(transaction.id, timer.snapshot());
@@ -299,6 +354,8 @@ export async function executeAsynchronousCharge(input: {
   let result;
 
   try {
+    assertProviderCanAcceptTraffic(input.provider, gateway);
+
     result = await adapter.charge({
       transactionId: transaction.id,
       amount: Number(transaction.grossAmount),
@@ -307,6 +364,7 @@ export async function executeAsynchronousCharge(input: {
       customerEmail: transaction.customerEmail,
       customerName: transaction.customerName,
       externalReference: transaction.externalReference,
+      paymentMethod: input.paymentMethod,
       phase: "capture"
     });
     timer.mark("provider-capture");
@@ -350,11 +408,21 @@ export async function executeAsynchronousCharge(input: {
       failureReason: message
     });
 
+    const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
+    await maybeFinalizeRecipientVerificationFromTransaction({
+      id: transaction.id,
+      appId: transaction.appId,
+      status: "FAILED",
+      metadata: transaction.metadata,
+      failureReason: message
+    });
+
     throw new Error(message);
   }
 
   const nextStatus: TransactionStatus =
     result.status === "FAILED" ? "FAILED" : result.status === "SUCCESS" ? "SUCCEEDED" : "PROCESSING";
+  const failureReason = result.status === "FAILED" ? extractGatewayFailureReason(result.raw) : null;
 
   await withTransientDbRetry(
     () =>
@@ -385,7 +453,7 @@ export async function executeAsynchronousCharge(input: {
             data: {
               status: nextStatus,
               selectedProvider: input.provider,
-              failureReason: result.status === "FAILED" ? "Payment authorization failed" : null
+              failureReason
             }
           });
 
@@ -413,6 +481,19 @@ export async function executeAsynchronousCharge(input: {
             orchestrationMode: transaction.orchestrationMode,
             settlementStrategy: transaction.settlementStrategy
           });
+
+          if (nextStatus === "SUCCEEDED") {
+            await recordPlatformFeeCapture(tx, {
+              id: transaction.id,
+              status: nextStatus,
+              currency: transaction.currency,
+              platformFeeAmount: transaction.platformFeeAmount,
+              externalReference: transaction.externalReference,
+              selectedProvider: input.provider,
+              appId: transaction.appId,
+              organizationId: transaction.organizationId
+            });
+          }
 
           if (
             nextStatus === "SUCCEEDED" &&
@@ -499,7 +580,16 @@ export async function executeAsynchronousCharge(input: {
       status: nextStatus,
       metadata: transaction.metadata,
       settlementAmount: transaction.settlementAmount,
-      failureReason: nextStatus === "FAILED" ? "Payment authorization failed" : null
+      failureReason
+    });
+
+    const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
+    await maybeFinalizeRecipientVerificationFromTransaction({
+      id: transaction.id,
+      appId: transaction.appId,
+      status: nextStatus,
+      metadata: transaction.metadata,
+      failureReason
     });
   }
 
@@ -558,6 +648,25 @@ function isTransientPrismaError(error: unknown) {
     error instanceof Prisma.PrismaClientKnownRequestError &&
     ["P1000", "P1001", "P1002", "P2024", "P2028"].includes(error.code)
   );
+}
+
+function extractGatewayFailureReason(raw: Record<string, unknown>) {
+  const candidate =
+    readString(raw.message) ??
+    readString(raw.error) ??
+    readString(raw.reason) ??
+    readString(raw.status_message) ??
+    readString(raw.statusMessage);
+
+  if (!candidate) {
+    return "Payment authorization failed";
+  }
+
+  return candidate.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function readString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 async function safeQueueAdd(label: string, enqueue: () => Promise<unknown>) {

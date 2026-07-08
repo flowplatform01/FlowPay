@@ -32,6 +32,27 @@ const envSchema = z.object({
     z.string().optional()
   ),
   CAMPAY_APP_ID: z.string().optional(),
+  FAPSHI_BASE_URL: z.string().default("https://live.fapshi.com"),
+  FAPSHI_LIVE_BASE_URL: z.string().optional(),
+  FAPSHI_SANDBOX_BASE_URL: z.string().default("https://sandbox.fapshi.com"),
+  FAPSHI_LIVE_API_KEY_USER: z.string().optional(),
+  FAPSHI_LIVE_API_USER: z.string().optional(),
+  FAPSHI_LIVE_APIUSER: z.string().optional(),
+  FAPSHI_LIVE_API_KEY: z.string().optional(),
+  FAPSHI_LIVE_APIKEY: z.string().optional(),
+  FAPSHI_LIVE_WEBHOOK_SECRET: z.string().optional(),
+  FAPSHI_API_KEY_USER: z.string().optional(),
+  FAPSHI_API_USER: z.string().optional(),
+  FAPSHI_APIUSER: z.string().optional(),
+  FAPSHI_API_KEY: z.string().optional(),
+  FAPSHI_APIKEY: z.string().optional(),
+  FAPSHI_WEBHOOK_SECRET: z.string().optional(),
+  FAPSHI_SANDBOX_API_KEY_USER: z.string().optional(),
+  FAPSHI_SANDBOX_API_USER: z.string().optional(),
+  FAPSHI_SANDBOX_APIUSER: z.string().optional(),
+  FAPSHI_SANDBOX_API_KEY: z.string().optional(),
+  FAPSHI_SANDBOX_APIKEY: z.string().optional(),
+  FAPSHI_SANDBOX_WEBHOOK_SECRET: z.string().optional(),
   MAVIANCE_BASE_URL: z.string().default("https://api.maviance.com"),
   MAVIANCE_PUBLIC_KEY: z.string().optional(),
   MAVIANCE_SECRET_KEY: z.string().optional(),
@@ -49,6 +70,30 @@ const envSchema = z.object({
 });
 
 const parsed = envSchema.parse(process.env);
+const fapshiLiveBaseUrl = parsed.FAPSHI_LIVE_BASE_URL ?? parsed.FAPSHI_BASE_URL;
+const fapshiLiveApiUser =
+  parsed.FAPSHI_LIVE_API_USER ??
+  parsed.FAPSHI_LIVE_APIUSER ??
+  parsed.FAPSHI_LIVE_API_KEY_USER ??
+  parsed.FAPSHI_API_USER ??
+  parsed.FAPSHI_APIUSER ??
+  parsed.FAPSHI_API_KEY_USER ??
+  "";
+const fapshiLiveApiKey =
+  parsed.FAPSHI_LIVE_API_KEY ?? parsed.FAPSHI_LIVE_APIKEY ?? parsed.FAPSHI_API_KEY ?? parsed.FAPSHI_APIKEY ?? "";
+const fapshiLiveWebhookSecret = parsed.FAPSHI_LIVE_WEBHOOK_SECRET ?? parsed.FAPSHI_WEBHOOK_SECRET;
+const fapshiSandboxApiUser =
+  parsed.FAPSHI_SANDBOX_API_USER ?? parsed.FAPSHI_SANDBOX_APIUSER ?? parsed.FAPSHI_SANDBOX_API_KEY_USER ?? "";
+const fapshiSandboxApiKey = parsed.FAPSHI_SANDBOX_API_KEY ?? parsed.FAPSHI_SANDBOX_APIKEY ?? "";
+const fapshiRuntimeMode = parsed.NODE_ENV === "production" ? "live" : "sandbox";
+const fapshiRuntimeBaseUrl =
+  fapshiRuntimeMode === "live" ? fapshiLiveBaseUrl : parsed.FAPSHI_SANDBOX_BASE_URL;
+const fapshiRuntimeApiUser = fapshiRuntimeMode === "live" ? fapshiLiveApiUser : fapshiSandboxApiUser;
+const fapshiRuntimeApiKey = fapshiRuntimeMode === "live" ? fapshiLiveApiKey : fapshiSandboxApiKey;
+const fapshiRuntimeWebhookSecret =
+  fapshiRuntimeMode === "live"
+    ? fapshiLiveWebhookSecret
+    : parsed.FAPSHI_SANDBOX_WEBHOOK_SECRET ?? parsed.FAPSHI_WEBHOOK_SECRET;
 
 export const env = {
   ...parsed,
@@ -66,5 +111,21 @@ export const env = {
   MAVIANCE_SECRET_KEY: parsed.MAVIANCE_SECRET_KEY ?? parsed.MAVIANCE_SECRET ?? "",
   MAVIANCE_PUBLIC_KEY: parsed.MAVIANCE_PUBLIC_KEY ?? parsed.MAVIANCE_API_KEY ?? "",
   CINETPAY_SECRET_KEY: parsed.CINETPAY_SECRET_KEY ?? parsed.CINETPAY_SECRET ?? "",
-  CINETPAY_PUBLIC_KEY: parsed.CINETPAY_PUBLIC_KEY ?? parsed.CINETPAY_API_KEY ?? ""
+  CINETPAY_PUBLIC_KEY: parsed.CINETPAY_PUBLIC_KEY ?? parsed.CINETPAY_API_KEY ?? "",
+  FAPSHI_LIVE_BASE_URL: fapshiLiveBaseUrl,
+  FAPSHI_LIVE_API_USER: fapshiLiveApiUser,
+  FAPSHI_LIVE_API_KEY: fapshiLiveApiKey,
+  FAPSHI_LIVE_WEBHOOK_SECRET: fapshiLiveWebhookSecret ?? parsed.WEBHOOK_SIGNING_SECRET ?? parsed.JWT_SECRET,
+  FAPSHI_API_USER: fapshiLiveApiUser,
+  FAPSHI_API_KEY: fapshiLiveApiKey,
+  FAPSHI_SANDBOX_API_USER: fapshiSandboxApiUser,
+  FAPSHI_SANDBOX_API_KEY: fapshiSandboxApiKey,
+  FAPSHI_HAS_LIVE_CREDENTIALS: Boolean(fapshiLiveApiUser && fapshiLiveApiKey),
+  FAPSHI_HAS_SANDBOX_CREDENTIALS: Boolean(fapshiSandboxApiUser && fapshiSandboxApiKey),
+  FAPSHI_RUNTIME_MODE: fapshiRuntimeMode,
+  FAPSHI_RUNTIME_BASE_URL: fapshiRuntimeBaseUrl,
+  FAPSHI_RUNTIME_API_USER: fapshiRuntimeApiUser,
+  FAPSHI_RUNTIME_API_KEY: fapshiRuntimeApiKey,
+  FAPSHI_WEBHOOK_SECRET: parsed.FAPSHI_WEBHOOK_SECRET ?? parsed.WEBHOOK_SIGNING_SECRET ?? parsed.JWT_SECRET,
+  FAPSHI_RUNTIME_WEBHOOK_SECRET: fapshiRuntimeWebhookSecret ?? parsed.WEBHOOK_SIGNING_SECRET ?? parsed.JWT_SECRET
 };

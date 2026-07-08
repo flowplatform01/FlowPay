@@ -10,6 +10,7 @@ export type GatewayChargeInput = {
   customerEmail?: string | null;
   customerName?: string | null;
   externalReference: string;
+  paymentMethod?: string | null;
   phase?: GatewayChargePhase;
 };
 
@@ -41,10 +42,18 @@ export type GatewayPayoutResult = {
   raw: Record<string, unknown>;
 };
 
+export type GatewayBalanceResult = {
+  service?: string;
+  balance?: number;
+  currency?: string;
+  raw?: Record<string, unknown>;
+};
+
 export interface GatewayAdapter {
   provider: GatewayProvider;
   charge(input: GatewayChargeInput): Promise<GatewayChargeResult>;
   getTransactionStatus?(providerReference: string): Promise<GatewayStatusResult>;
   executePayout?(input: GatewayPayoutInput): Promise<GatewayPayoutResult>;
+  getBalance?(): Promise<GatewayBalanceResult>;
   verifyWebhookSignature(payload: string, signature?: string): boolean;
 }

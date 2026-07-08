@@ -20,6 +20,8 @@ export async function createAppRegistration(input: {
   destinationProfileProvisioningEnabled?: boolean;
   destinationProfileAutoVerifyEnabled?: boolean;
   destinationProfileLimit?: number;
+  recipientVerificationPaymentEnabled?: boolean;
+  recipientVerificationAmountXaf?: number;
 }) {
   const clientId = generateOpaqueKey("client");
   const clientSecret = generateOpaqueKey("client_secret");
@@ -44,6 +46,8 @@ export async function createAppRegistration(input: {
       destinationProfileProvisioningEnabled: input.destinationProfileProvisioningEnabled ?? false,
       destinationProfileAutoVerifyEnabled: input.destinationProfileAutoVerifyEnabled ?? false,
       destinationProfileLimit: input.destinationProfileLimit ?? 0,
+      recipientVerificationPaymentEnabled: input.recipientVerificationPaymentEnabled ?? false,
+      recipientVerificationAmountXaf: (input.recipientVerificationAmountXaf ?? 100).toFixed(2),
       apiKeys: {
         create: [
           { label: "Public key", type: "PUBLIC", hashedKey: hashSecret(publicKey) },
@@ -114,6 +118,8 @@ export async function updateAppConfiguration(
     destinationProfileProvisioningEnabled?: boolean;
     destinationProfileAutoVerifyEnabled?: boolean;
     destinationProfileLimit?: number;
+    recipientVerificationPaymentEnabled?: boolean;
+    recipientVerificationAmountXaf?: number;
   }
 ) {
   const app = await prisma.app.update({
@@ -130,7 +136,12 @@ export async function updateAppConfiguration(
       mode2MeteringEnabled: input.mode2MeteringEnabled,
       destinationProfileProvisioningEnabled: input.destinationProfileProvisioningEnabled,
       destinationProfileAutoVerifyEnabled: input.destinationProfileAutoVerifyEnabled,
-      destinationProfileLimit: input.destinationProfileLimit
+      destinationProfileLimit: input.destinationProfileLimit,
+      recipientVerificationPaymentEnabled: input.recipientVerificationPaymentEnabled,
+      recipientVerificationAmountXaf:
+        input.recipientVerificationAmountXaf === undefined
+          ? undefined
+          : input.recipientVerificationAmountXaf.toFixed(2)
     },
     include: appInclude
   });
@@ -151,7 +162,9 @@ export async function updateAppConfiguration(
       destinationProvisioningUpdated:
         input.destinationProfileProvisioningEnabled !== undefined ||
         input.destinationProfileAutoVerifyEnabled !== undefined ||
-        input.destinationProfileLimit !== undefined
+        input.destinationProfileLimit !== undefined ||
+        input.recipientVerificationPaymentEnabled !== undefined ||
+        input.recipientVerificationAmountXaf !== undefined
     }
   });
 
