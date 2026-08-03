@@ -9,6 +9,10 @@ export const createAppSchema = z.object({
   orchestrationCredits: z.number().nonnegative().optional(),
   processingUnits: z.number().nonnegative().optional(),
   infrastructureUsageBalance: z.number().nonnegative().optional(),
+  autoCreditRefillEnabled: z.boolean().optional(),
+  autoCreditRefillThreshold: z.number().nonnegative().optional(),
+  autoCreditRefillAmount: z.number().nonnegative().optional(),
+  autoCreditRefillProvider: z.nativeEnum(GatewayProvider).nullable().optional(),
   mode1MeteringEnabled: z.boolean().optional(),
   mode2MeteringEnabled: z.boolean().optional(),
   destinationProfileProvisioningEnabled: z.boolean().optional(),
@@ -24,6 +28,10 @@ export const updateAppSchema = z.object({
   orchestrationCredits: z.number().nonnegative().optional(),
   processingUnits: z.number().nonnegative().optional(),
   infrastructureUsageBalance: z.number().nonnegative().optional(),
+  autoCreditRefillEnabled: z.boolean().optional(),
+  autoCreditRefillThreshold: z.number().nonnegative().optional(),
+  autoCreditRefillAmount: z.number().nonnegative().optional(),
+  autoCreditRefillProvider: z.nativeEnum(GatewayProvider).nullable().optional(),
   mode1MeteringEnabled: z.boolean().optional(),
   mode2MeteringEnabled: z.boolean().optional(),
   destinationProfileProvisioningEnabled: z.boolean().optional(),
@@ -52,6 +60,13 @@ export const topUpAppCreditsSchema = z
       message: "At least one credit amount is required"
     }
   );
+
+export const fundAppCreditsFromTreasurySchema = z.object({
+  amount: z.number().positive(),
+  currency: z.string().length(3).default("XAF"),
+  provider: z.nativeEnum(GatewayProvider),
+  reason: z.string().min(2).optional()
+});
 
 export const rotateAppCredentialsSchema = z.object({
   rotateClientSecret: z.boolean().optional(),

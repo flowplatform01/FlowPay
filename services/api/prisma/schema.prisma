@@ -123,6 +123,7 @@ enum TreasuryLedgerEntryType {
   WITHDRAWAL_RESERVED
   WITHDRAWAL_EXECUTED
   WITHDRAWAL_REVERSED
+  APP_CREDIT_REFILL
   ADJUSTMENT
 }
 
@@ -182,6 +183,10 @@ model App {
   orchestrationCredits       Decimal                       @default(0) @db.Decimal(18, 2)
   processingUnits            Decimal                       @default(0) @db.Decimal(18, 2)
   infrastructureUsageBalance Decimal                       @default(0) @db.Decimal(18, 2)
+  autoCreditRefillEnabled    Boolean                       @default(false)
+  autoCreditRefillThreshold  Decimal                       @default(0) @db.Decimal(18, 2)
+  autoCreditRefillAmount     Decimal                       @default(0) @db.Decimal(18, 2)
+  autoCreditRefillProvider   GatewayProvider?
   mode1MeteringEnabled       Boolean                       @default(false)
   mode2MeteringEnabled       Boolean                       @default(true)
   destinationProfileProvisioningEnabled Boolean             @default(false)
@@ -540,6 +545,7 @@ model TreasuryLedgerEntry {
   entryType           TreasuryLedgerEntryType
   direction           TreasuryLedgerDirection
   status              TreasuryLedgerStatus     @default(AVAILABLE)
+  provider            GatewayProvider?
   currency            String
   amount              Decimal                  @db.Decimal(18, 2)
   sourceTransactionId String?
@@ -552,6 +558,8 @@ model TreasuryLedgerEntry {
   createdAt           DateTime                 @default(now())
 
   @@unique([sourceTransactionId, entryType])
+  @@index([provider, currency, status])
+  @@index([provider, entryType, createdAt])
   @@index([currency, status, createdAt])
   @@index([entryType, createdAt])
   @@index([sourceWithdrawalId])

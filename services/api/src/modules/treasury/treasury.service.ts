@@ -28,6 +28,16 @@ type CreateTreasuryWithdrawalInput = {
   metadata?: Record<string, unknown>;
 };
 
+type FundAppCreditsFromTreasuryInput = {
+  appId: string;
+  amount: number;
+  currency: string;
+  provider: GatewayProvider;
+  actorId?: string | null;
+  reason?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
 export async function recordPlatformFeeCapture(
   tx: TreasuryWriter,
   transaction: TreasuryTransactionInput
@@ -49,6 +59,7 @@ export async function recordPlatformFeeCapture(
       entryType: "PLATFORM_FEE_CAPTURED",
       direction: "CREDIT",
       status: "AVAILABLE",
+      provider: transaction.selectedProvider as GatewayProvider,
       currency: transaction.currency,
       amount: transaction.platformFeeAmount,
       sourceTransactionId: transaction.id,
@@ -99,6 +110,7 @@ export async function reconcileTreasuryLedger(input?: { limit?: number }) {
           entryType: "PLATFORM_FEE_CAPTURED",
           direction: "CREDIT",
           status: "AVAILABLE",
+          provider: transaction.selectedProvider,
           currency: transaction.currency,
           amount: transaction.platformFeeAmount,
           sourceTransactionId: transaction.id,
@@ -136,9 +148,9 @@ export async function createTreasuryWithdrawal(input: CreateTreasuryWithdrawalIn
   }
 
   return prisma.$transaction(async (tx) => {
-    const balance = await getSpendableTreasuryBalance(currency);
+    const balance = await getSpendableTreasuryBalance(currency, input.provider);
     if (balance < amount) {
-      throw new Error(`Insufficient FlowPay treasury balance. Available ${balance} ${currency}`);
+      throw new Error(`Insufficient FlowPay ${input.provider} treasury balance. Available ${balance} ${currency}`);
     }
 
     const withdrawal = await tx.treasuryWithdrawal.create({
@@ -171,6 +183,7 @@ export async function createTreasuryWithdrawal(input: CreateTreasuryWithdrawalIn
         entryType: "WITHDRAWAL_RESERVED",
         direction: "DEBIT",
         status: "AVAILABLE",
+        provider: input.provider,
         currency,
         amount: withdrawal.amount,
         sourceWithdrawalId: withdrawal.id,
@@ -356,7 +369,7 @@ export async function getTreasuryOverview() {
     withdrawals
   ] = await Promise.all([
     prisma.treasuryLedgerEntry.groupBy({
-      by: ["currency", "direction", "status", "entryType"],
+      by: ["provider", "currency", "direction", "status", "entryType"],
       _sum: { amount: true },
       _count: { _all: true }
     }),
@@ -400,12 +413,36 @@ export async function getTreasuryOverview() {
     debits: number;
     entries: number;
   }>();
+  const balancesByGateway = new Map<string, {
+    provider: GatewayProvider | "UNASSIGNED";
+    currency: string;
+    availableBalance: number;
+    pendingBalance: number;
+    settledBalance: number;
+    historicalRevenue: number;
+    debits: number;
+    entries: number;
+  }>();
 
   for (const group of balanceGroups) {
     const currency = group.currency;
+    const provider = group.provider ?? "UNASSIGNED";
+    const gatewayKey = `${provider}:${currency}`;
     const current =
       balancesByCurrency.get(currency) ??
       {
+        currency,
+        availableBalance: 0,
+        pendingBalance: 0,
+        settledBalance: 0,
+        historicalRevenue: 0,
+        debits: 0,
+        entries: 0
+      };
+    const gatewayCurrent =
+      balancesByGateway.get(gatewayKey) ??
+      {
+        provider,
         currency,
         availableBalance: 0,
         pendingBalance: 0,
@@ -418,32 +455,44 @@ export async function getTreasuryOverview() {
     const signedAmount = group.direction === "CREDIT" ? amount : -amount;
 
     current.entries += group._count._all;
+    gatewayCurrent.entries += group._count._all;
 
     if (group.status === "PENDING") {
       current.pendingBalance += signedAmount;
+      gatewayCurrent.pendingBalance += signedAmount;
     }
 
     if (group.status === "AVAILABLE" || group.status === "SETTLED") {
       current.availableBalance += signedAmount;
+      gatewayCurrent.availableBalance += signedAmount;
     }
 
     if (group.status === "SETTLED") {
       current.settledBalance += signedAmount;
+      gatewayCurrent.settledBalance += signedAmount;
     }
 
     if (group.entryType === "PLATFORM_FEE_CAPTURED" && group.direction === "CREDIT" && group.status !== "VOID") {
       current.historicalRevenue += amount;
+      gatewayCurrent.historicalRevenue += amount;
     }
 
     if (group.direction === "DEBIT" && group.status !== "VOID") {
       current.debits += amount;
+      gatewayCurrent.debits += amount;
     }
 
     balancesByCurrency.set(currency, current);
+    balancesByGateway.set(gatewayKey, gatewayCurrent);
   }
 
   const balances = Array.from(balancesByCurrency.values()).sort((left, right) =>
     left.currency.localeCompare(right.currency)
+  );
+  const gatewayBalances = Array.from(balancesByGateway.values()).sort((left, right) =>
+    left.provider === right.provider
+      ? left.currency.localeCompare(right.currency)
+      : left.provider.localeCompare(right.provider)
   );
   const primary = balances.find((balance) => balance.currency === "XAF") ?? balances[0] ?? {
     currency: "XAF",
@@ -469,11 +518,13 @@ export async function getTreasuryOverview() {
       reconciliationStatus: missingPlatformFeeCaptures === 0 ? "RECONCILED" : "ACTION_REQUIRED"
     },
     balances,
+    gatewayBalances,
     ledger: recentLedger.map((entry) => ({
       id: entry.id,
       entryType: entry.entryType,
       direction: entry.direction,
       status: entry.status,
+      provider: entry.provider ?? entry.transaction?.selectedProvider ?? entry.withdrawal?.provider ?? null,
       currency: entry.currency,
       amount: entry.amount.toString(),
       reference: entry.reference,
@@ -546,6 +597,7 @@ async function markTreasuryWithdrawalSucceeded(
         entryType: "WITHDRAWAL_EXECUTED",
         direction: "DEBIT",
         status: "SETTLED",
+        provider: withdrawal.provider,
         currency: withdrawal.currency,
         amount: withdrawal.amount,
         sourceWithdrawalId: withdrawal.id,
@@ -609,6 +661,7 @@ async function reverseTreasuryWithdrawal(
         entryType: "WITHDRAWAL_REVERSED",
         direction: "CREDIT",
         status: "AVAILABLE",
+        provider: existing.provider,
         currency: existing.currency,
         amount: existing.amount,
         sourceWithdrawalId: existing.id,
@@ -634,6 +687,7 @@ async function reverseTreasuryWithdrawal(
         entityType: "TreasuryWithdrawal",
         entityId: id,
         payload: {
+          provider: existing.provider,
           amount: existing.amount.toString(),
           currency: existing.currency,
           reason: reason ?? null
@@ -659,11 +713,96 @@ async function countMissingTreasuryCaptures() {
   });
 }
 
-async function getSpendableTreasuryBalance(currency: string) {
+export async function fundAppCreditsFromTreasury(input: FundAppCreditsFromTreasuryInput) {
+  const amount = normalizeAmount(input.amount);
+  const currency = normalizeCurrency(input.currency);
+
+  return prisma.$transaction(async (tx) => {
+    const balance = await getSpendableTreasuryBalance(currency, input.provider);
+    if (balance < amount) {
+      throw new Error(`Insufficient FlowPay ${input.provider} treasury balance. Available ${balance} ${currency}`);
+    }
+
+    const app = await tx.app.findUniqueOrThrow({
+      where: { id: input.appId },
+      select: {
+        infrastructureUsageBalance: true,
+        processingUnits: true,
+        orchestrationCredits: true
+      }
+    });
+    const before = {
+      infrastructureUsageBalance: Number(app.infrastructureUsageBalance),
+      processingUnits: Number(app.processingUnits),
+      orchestrationCredits: Number(app.orchestrationCredits)
+    };
+    const after = {
+      infrastructureUsageBalance: before.infrastructureUsageBalance + amount,
+      processingUnits: before.processingUnits + Math.ceil(amount),
+      orchestrationCredits: before.orchestrationCredits + amount
+    };
+
+    const updated = await tx.app.update({
+      where: { id: input.appId },
+      data: {
+        infrastructureUsageBalance: after.infrastructureUsageBalance.toFixed(2),
+        processingUnits: after.processingUnits.toFixed(2),
+        orchestrationCredits: after.orchestrationCredits.toFixed(2)
+      }
+    });
+
+    const reference = `treasury:app-credit-refill:${input.appId}:${randomUUID()}`;
+    await tx.treasuryLedgerEntry.create({
+      data: {
+        entryType: "APP_CREDIT_REFILL",
+        direction: "DEBIT",
+        status: "SETTLED",
+        provider: input.provider,
+        currency,
+        amount: new Prisma.Decimal(amount),
+        reference,
+        description: `Treasury-funded credit refill for app ${input.appId}`,
+        metadata: {
+          ...(input.metadata ?? {}),
+          appId: input.appId,
+          provider: input.provider,
+          actorId: input.actorId ?? null,
+          reason: input.reason ?? null,
+          before,
+          after
+        } as Prisma.InputJsonValue
+      }
+    });
+
+    await tx.auditLog.create({
+      data: {
+        actorType: input.actorId ? "ADMIN" : "INTERNAL_SERVICE",
+        actorId: input.actorId ?? null,
+        action: "treasury.app_credit_refill_funded",
+        entityType: "App",
+        entityId: input.appId,
+        payload: {
+          amount,
+          currency,
+          provider: input.provider,
+          reference,
+          reason: input.reason ?? null,
+          before,
+          after
+        } as Prisma.InputJsonValue
+      }
+    });
+
+    return updated;
+  });
+}
+
+async function getSpendableTreasuryBalance(currency: string, provider?: GatewayProvider | null) {
   const groups = await prisma.treasuryLedgerEntry.groupBy({
     by: ["direction", "status"],
     where: {
       currency,
+      provider: provider ?? undefined,
       status: { in: ["AVAILABLE", "SETTLED"] }
     },
     _sum: { amount: true }

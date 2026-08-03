@@ -2,6 +2,7 @@ import { Prisma, type GatewayProvider, type PayoutCoordinationStatus } from "@pr
 import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { getGatewayAdapter } from "../gateways/gateways.service.js";
 import type { GatewayPayoutResult } from "../gateways/gateway.types.js";
+import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 
 type CoordinationForProcessing = Prisma.PayoutCoordinationGetPayload<{
   include: {
@@ -164,6 +165,13 @@ export async function processPayoutCoordination(id: string) {
 
     const nextStatus = mapPayoutStatus(result.status);
     const retryable = nextStatus === "FAILED" && coordination.attempts + 1 < 6;
+    const isAppPayout = isAppPayoutTransaction(coordination);
+    const nextTransactionStatus =
+      nextStatus === "SUCCEEDED"
+        ? "SUCCEEDED"
+        : nextStatus === "FAILED" && !retryable
+          ? "FAILED"
+          : "PROCESSING";
 
     await prisma.$transaction(
       async (tx) => {
@@ -180,6 +188,16 @@ export async function processPayoutCoordination(id: string) {
                 : null
           }
         });
+
+        if (isAppPayout) {
+          await tx.transaction.update({
+            where: { id: coordination.transactionId },
+            data: {
+              status: nextTransactionStatus,
+              failureReason: nextTransactionStatus === "FAILED" ? "Provider payout execution failed" : null
+            }
+          });
+        }
 
         if (nextStatus === "SUCCEEDED") {
           await tx.settlement.updateMany({
@@ -226,29 +244,57 @@ export async function processPayoutCoordination(id: string) {
       prismaTransactionOptions
     );
 
+    if (isAppPayout && ["SUCCEEDED", "FAILED"].includes(nextTransactionStatus)) {
+      await enqueueAppPayoutWebhook(coordination.transactionId, nextTransactionStatus.toLowerCase());
+    }
+
     return { processed: true, status: nextStatus };
   } catch (error) {
     const reason = formatErrorMessage(error);
     const retryable = coordination.attempts + 1 < 6;
+    const isAppPayout = isAppPayoutTransaction(coordination);
 
-    await prisma.payoutCoordination.update({
-      where: { id: coordination.id },
-      data: {
-        status: "FAILED",
-        failureReason: reason,
-        nextRunAt: retryable ? nextPayoutAttemptAt(coordination.attempts + 1) : null,
-        responsePayload: {
-          error: reason
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.payoutCoordination.update({
+          where: { id: coordination.id },
+          data: {
+            status: "FAILED",
+            failureReason: reason,
+            nextRunAt: retryable ? nextPayoutAttemptAt(coordination.attempts + 1) : null,
+            responsePayload: {
+              error: reason
+            }
+          }
+        });
+
+        if (isAppPayout && !retryable) {
+          await tx.transaction.update({
+            where: { id: coordination.transactionId },
+            data: {
+              status: "FAILED",
+              failureReason: reason
+            }
+          });
         }
-      }
-    });
+      },
+      prismaTransactionOptions
+    );
+
+    if (isAppPayout && !retryable) {
+      await enqueueAppPayoutWebhook(coordination.transactionId, "failed");
+    }
 
     return { processed: true, status: "FAILED" as PayoutCoordinationStatus, reason };
   }
 }
 
 function validatePayoutCoordination(coordination: CoordinationForProcessing) {
-  if (coordination.transaction.status !== "SUCCEEDED") {
+  const validSourceStatus = isAppPayoutTransaction(coordination)
+    ? ["PROCESSING", "SUCCEEDED"].includes(coordination.transaction.status)
+    : coordination.transaction.status === "SUCCEEDED";
+
+  if (!validSourceStatus) {
     return `Transaction is ${coordination.transaction.status}; payout cannot execute`;
   }
 
@@ -273,6 +319,34 @@ function validatePayoutCoordination(coordination: CoordinationForProcessing) {
   }
 
   return null;
+}
+
+function isAppPayoutTransaction(coordination: CoordinationForProcessing) {
+  const metadata = coordination.transaction.metadata;
+  return Boolean(
+    metadata &&
+      typeof metadata === "object" &&
+      !Array.isArray(metadata) &&
+      (metadata as Record<string, unknown>).source === "app_payout"
+  );
+}
+
+async function enqueueAppPayoutWebhook(transactionId: string, status: string) {
+  if (!webhookQueue) return;
+  const eventType = `payout.${status}`;
+  const queue = webhookQueue;
+  await addQueueJobSafely("webhook-queue", () =>
+    queue.add(
+      "dispatch-app-webhook",
+      {
+        transactionId,
+        eventType
+      },
+      {
+        jobId: `webhook:${transactionId}:${eventType}`
+      }
+    )
+  );
 }
 
 function mapPayoutStatus(status: "PENDING" | "SUCCESS" | "FAILED"): PayoutCoordinationStatus {

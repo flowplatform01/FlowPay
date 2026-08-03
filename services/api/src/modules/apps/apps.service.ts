@@ -15,6 +15,10 @@ export async function createAppRegistration(input: {
   orchestrationCredits?: number;
   processingUnits?: number;
   infrastructureUsageBalance?: number;
+  autoCreditRefillEnabled?: boolean;
+  autoCreditRefillThreshold?: number;
+  autoCreditRefillAmount?: number;
+  autoCreditRefillProvider?: GatewayProvider | null;
   mode1MeteringEnabled?: boolean;
   mode2MeteringEnabled?: boolean;
   destinationProfileProvisioningEnabled?: boolean;
@@ -41,6 +45,10 @@ export async function createAppRegistration(input: {
       orchestrationCredits: (input.orchestrationCredits ?? 0).toFixed(2),
       processingUnits: (input.processingUnits ?? 0).toFixed(2),
       infrastructureUsageBalance: (input.infrastructureUsageBalance ?? 0).toFixed(2),
+      autoCreditRefillEnabled: input.autoCreditRefillEnabled ?? false,
+      autoCreditRefillThreshold: (input.autoCreditRefillThreshold ?? 0).toFixed(2),
+      autoCreditRefillAmount: (input.autoCreditRefillAmount ?? 0).toFixed(2),
+      autoCreditRefillProvider: input.autoCreditRefillProvider ?? null,
       mode1MeteringEnabled: input.mode1MeteringEnabled ?? false,
       mode2MeteringEnabled: input.mode2MeteringEnabled ?? true,
       destinationProfileProvisioningEnabled: input.destinationProfileProvisioningEnabled ?? false,
@@ -113,6 +121,10 @@ export async function updateAppConfiguration(
     orchestrationCredits?: number;
     processingUnits?: number;
     infrastructureUsageBalance?: number;
+    autoCreditRefillEnabled?: boolean;
+    autoCreditRefillThreshold?: number;
+    autoCreditRefillAmount?: number;
+    autoCreditRefillProvider?: GatewayProvider | null;
     mode1MeteringEnabled?: boolean;
     mode2MeteringEnabled?: boolean;
     destinationProfileProvisioningEnabled?: boolean;
@@ -132,6 +144,13 @@ export async function updateAppConfiguration(
       processingUnits: input.processingUnits === undefined ? undefined : input.processingUnits.toFixed(2),
       infrastructureUsageBalance:
         input.infrastructureUsageBalance === undefined ? undefined : input.infrastructureUsageBalance.toFixed(2),
+      autoCreditRefillEnabled: input.autoCreditRefillEnabled,
+      autoCreditRefillThreshold:
+        input.autoCreditRefillThreshold === undefined ? undefined : input.autoCreditRefillThreshold.toFixed(2),
+      autoCreditRefillAmount:
+        input.autoCreditRefillAmount === undefined ? undefined : input.autoCreditRefillAmount.toFixed(2),
+      autoCreditRefillProvider:
+        input.autoCreditRefillProvider === undefined ? undefined : input.autoCreditRefillProvider,
       mode1MeteringEnabled: input.mode1MeteringEnabled,
       mode2MeteringEnabled: input.mode2MeteringEnabled,
       destinationProfileProvisioningEnabled: input.destinationProfileProvisioningEnabled,
@@ -157,6 +176,10 @@ export async function updateAppConfiguration(
         input.orchestrationCredits !== undefined ||
         input.processingUnits !== undefined ||
         input.infrastructureUsageBalance !== undefined ||
+        input.autoCreditRefillEnabled !== undefined ||
+        input.autoCreditRefillThreshold !== undefined ||
+        input.autoCreditRefillAmount !== undefined ||
+        input.autoCreditRefillProvider !== undefined ||
         input.mode1MeteringEnabled !== undefined ||
         input.mode2MeteringEnabled !== undefined,
       destinationProvisioningUpdated:

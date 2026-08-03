@@ -17,6 +17,7 @@ import { registerCapacityPolicyRoutes } from "./modules/capacity-policy/capacity
 import { registerFeeRoutes } from "./modules/fees/fee-rules.routes.js";
 import { registerRevenuePayoutRoutes } from "./modules/revenue-payouts/revenue-payouts.routes.js";
 import { registerTreasuryRoutes } from "./modules/treasury/treasury.routes.js";
+import { registerPayoutRoutes } from "./modules/payouts/payouts.routes.js";
 
 export async function buildApp() {
   const app = Fastify({
@@ -71,6 +72,7 @@ export async function buildApp() {
     await registerCreditRoutes(instance);
     await registerCapacityPolicyRoutes(instance);
     await registerFeeRoutes(instance);
+    await registerPayoutRoutes(instance);
     await registerRevenuePayoutRoutes(instance);
     await registerTreasuryRoutes(instance);
   }, { prefix: "/api/v1" });

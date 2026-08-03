@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import {
   createAppSchema,
+  fundAppCreditsFromTreasurySchema,
   rotateAppCredentialsSchema,
   topUpAppCreditsSchema,
   updateAppAccessSchema,
@@ -16,6 +17,7 @@ import {
 } from "./apps.service.js";
 import { verifyInternalService } from "../auth/internal-auth.guard.js";
 import { initiateCreditPurchase } from "../credits/credits.service.js";
+import { fundAppCreditsFromTreasury } from "../treasury/treasury.service.js";
 import { createTransaction } from "../transactions/transactions.service.js";
 import { buildHostedCheckoutUrl, readTransactionMetadata } from "../checkout/checkout.service.js";
 import { z } from "zod";
@@ -58,6 +60,25 @@ export async function registerAppRoutes(app: FastifyInstance) {
 
     const { id } = request.params as { id: string };
     const result = await topUpAppCredits(id, parsed.data);
+    return reply.send(result);
+  });
+
+  app.post("/internal/apps/:id/fund-credits-from-treasury", { preHandler: [verifyInternalService] }, async (request, reply) => {
+    const parsed = fundAppCreditsFromTreasurySchema.safeParse(request.body);
+
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "Invalid treasury-funded credit refill payload" });
+    }
+
+    const { id } = request.params as { id: string };
+    const result = await fundAppCreditsFromTreasury({
+      appId: id,
+      amount: parsed.data.amount,
+      currency: parsed.data.currency,
+      provider: parsed.data.provider,
+      actorId: "internal-admin",
+      reason: parsed.data.reason ?? null
+    });
     return reply.send(result);
   });
 

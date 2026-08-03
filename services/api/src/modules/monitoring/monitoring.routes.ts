@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { prisma } from "../../config/db.js";
 import { verifyInternalService } from "../auth/internal-auth.guard.js";
 import { listAuditLogs } from "../audit/audit.service.js";
-import { retryQueue, webhookQueue } from "../../lib/queues.js";
+import { chargeQueue, retryQueue, webhookQueue } from "../../lib/queues.js";
 import { listPayoutCoordinations, processPayoutCoordination } from "../payouts/payout-coordination.service.js";
 import { isRedisCircuitOpen, isRedisQuotaError, openRedisCircuit } from "../../config/redis.js";
 
@@ -44,7 +44,8 @@ export async function registerMonitoringRoutes(app: FastifyInstance) {
 
   app.get("/internal/monitoring/queues", { preHandler: [verifyInternalService] }, async () => ({
     retryQueue: retryQueue ? await getQueueCountsSafely(retryQueue) : null,
-    webhookQueue: webhookQueue ? await getQueueCountsSafely(webhookQueue) : null
+    webhookQueue: webhookQueue ? await getQueueCountsSafely(webhookQueue) : null,
+    chargeQueue: chargeQueue ? await getQueueCountsSafely(chargeQueue) : null
   }));
 
   app.get("/internal/monitoring/settlements", { preHandler: [verifyInternalService] }, async () =>
