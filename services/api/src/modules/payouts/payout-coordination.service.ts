@@ -4,6 +4,8 @@ import { getGatewayAdapter } from "../gateways/gateways.service.js";
 import type { GatewayPayoutResult } from "../gateways/gateway.types.js";
 import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 
+const MAX_PAYOUT_ATTEMPTS = 6;
+
 type CoordinationForProcessing = Prisma.PayoutCoordinationGetPayload<{
   include: {
     destinationProfile: true;
@@ -35,7 +37,7 @@ export async function processDuePayoutCoordinations(limit = 25) {
   const cutoff = new Date(Date.now() - 30_000);
   const items = await prisma.payoutCoordination.findMany({
     where: {
-      attempts: { lt: 6 },
+      attempts: { lt: MAX_PAYOUT_ATTEMPTS },
       OR: [
         { status: "PENDING", nextRunAt: null, createdAt: { lt: cutoff } },
         { status: { in: ["PENDING", "FAILED"] }, nextRunAt: { lte: new Date() } }
@@ -48,6 +50,24 @@ export async function processDuePayoutCoordinations(limit = 25) {
 
   for (const item of items) {
     await processPayoutCoordination(item.id);
+  }
+
+  const exhaustedItems = await prisma.payoutCoordination.findMany({
+    where: {
+      status: "PENDING",
+      attempts: { gte: MAX_PAYOUT_ATTEMPTS },
+      OR: [{ nextRunAt: null }, { nextRunAt: { lte: new Date() } }]
+    },
+    select: { id: true },
+    orderBy: [{ updatedAt: "asc" }],
+    take: limit
+  });
+
+  for (const item of exhaustedItems) {
+    await markPayoutCoordinationReviewRequired(
+      item.id,
+      "Provider accepted payout but did not return a terminal confirmation after all retry attempts"
+    );
   }
 }
 
@@ -164,14 +184,20 @@ export async function processPayoutCoordination(id: string) {
     }
 
     const nextStatus = mapPayoutStatus(result.status);
-    const retryable = nextStatus === "FAILED" && coordination.attempts + 1 < 6;
+    const attemptNumber = coordination.attempts + 1;
+    const retryable = nextStatus === "FAILED" && attemptNumber < MAX_PAYOUT_ATTEMPTS;
+    const pendingExhausted = nextStatus === "PENDING" && attemptNumber >= MAX_PAYOUT_ATTEMPTS;
     const isAppPayout = isAppPayoutTransaction(coordination);
     const nextTransactionStatus =
       nextStatus === "SUCCEEDED"
         ? "SUCCEEDED"
         : nextStatus === "FAILED" && !retryable
           ? "FAILED"
+          : pendingExhausted
+            ? "UNDER_REVIEW"
           : "PROCESSING";
+    const reviewReason =
+      "Provider accepted payout but did not return a terminal confirmation after all retry attempts";
 
     await prisma.$transaction(
       async (tx) => {
@@ -179,11 +205,15 @@ export async function processPayoutCoordination(id: string) {
           where: { id: coordination.id },
           data: {
             provider: selectedProvider,
-            status: nextStatus,
+            status: pendingExhausted ? "FAILED" : nextStatus,
             responsePayload: result.raw as Prisma.InputJsonValue,
-            failureReason: nextStatus === "FAILED" ? "Provider payout execution failed" : null,
+            failureReason: pendingExhausted
+              ? reviewReason
+              : nextStatus === "FAILED"
+                ? "Provider payout execution failed"
+                : null,
             nextRunAt:
-              nextStatus === "PENDING" || retryable
+              !pendingExhausted && (nextStatus === "PENDING" || retryable)
                 ? nextPayoutAttemptAt(coordination.attempts + 1)
                 : null
           }
@@ -194,7 +224,12 @@ export async function processPayoutCoordination(id: string) {
             where: { id: coordination.transactionId },
             data: {
               status: nextTransactionStatus,
-              failureReason: nextTransactionStatus === "FAILED" ? "Provider payout execution failed" : null
+              failureReason:
+                nextTransactionStatus === "FAILED"
+                  ? "Provider payout execution failed"
+                  : nextTransactionStatus === "UNDER_REVIEW"
+                    ? reviewReason
+                    : null
             }
           });
         }
@@ -212,7 +247,9 @@ export async function processPayoutCoordination(id: string) {
         await tx.transactionEvent.create({
           data: {
             transactionId: coordination.transactionId,
-            eventType: `payout_coordination.${nextStatus.toLowerCase()}`,
+            eventType: pendingExhausted
+              ? "payout_coordination.operator_action_required"
+              : `payout_coordination.${nextStatus.toLowerCase()}`,
             payload: {
               payoutCoordinationId: coordination.id,
               provider: selectedProvider,
@@ -220,6 +257,7 @@ export async function processPayoutCoordination(id: string) {
               fallbackUsed: selectedProvider !== coordination.provider,
               attemptedProviders,
               providerReference: result.providerReference,
+              reason: pendingExhausted ? reviewReason : undefined,
               response: result.raw
             } as Prisma.InputJsonValue
           }
@@ -235,23 +273,44 @@ export async function processPayoutCoordination(id: string) {
               provider: selectedProvider,
               primaryProvider: coordination.provider,
               fallbackUsed: selectedProvider !== coordination.provider,
-              status: nextStatus,
+              status: pendingExhausted ? "UNDER_REVIEW" : nextStatus,
               transactionId: coordination.transactionId
             }
           }
         });
+
+        if (pendingExhausted) {
+          await tx.retryJob.create({
+            data: {
+              transactionId: coordination.transactionId,
+              queueName: "payout-coordination",
+              reason: reviewReason,
+              status: "FAILED",
+              attempts: attemptNumber,
+              payload: {
+                payoutCoordinationId: coordination.id,
+                provider: selectedProvider,
+                primaryProvider: coordination.provider,
+                attemptedProviders,
+                providerReference: result.providerReference
+              } as Prisma.InputJsonValue
+            }
+          });
+        }
       },
       prismaTransactionOptions
     );
 
     if (isAppPayout && ["SUCCEEDED", "FAILED"].includes(nextTransactionStatus)) {
       await enqueueAppPayoutWebhook(coordination.transactionId, nextTransactionStatus.toLowerCase());
+    } else if (isAppPayout && nextTransactionStatus === "UNDER_REVIEW") {
+      await enqueueAppPayoutWebhook(coordination.transactionId, "review_required");
     }
 
     return { processed: true, status: nextStatus };
   } catch (error) {
     const reason = formatErrorMessage(error);
-    const retryable = coordination.attempts + 1 < 6;
+    const retryable = coordination.attempts + 1 < MAX_PAYOUT_ATTEMPTS;
     const isAppPayout = isAppPayoutTransaction(coordination);
 
     await prisma.$transaction(
@@ -385,6 +444,85 @@ function resolvePayoutProviderCandidates(coordination: CoordinationForProcessing
 
 function nextPayoutAttemptAt(attempts: number) {
   return new Date(Date.now() + Math.min(attempts * 60_000, 15 * 60_000));
+}
+
+async function markPayoutCoordinationReviewRequired(id: string, reason: string) {
+  const coordination = await prisma.payoutCoordination.findUnique({
+    where: { id },
+    include: {
+      transaction: {
+        include: {
+          settlements: true
+        }
+      },
+      destinationProfile: true
+    }
+  });
+
+  if (!coordination || coordination.status !== "PENDING" || coordination.attempts < MAX_PAYOUT_ATTEMPTS) {
+    return { processed: false, skipped: true };
+  }
+
+  const isAppPayout = isAppPayoutTransaction(coordination);
+
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.payoutCoordination.update({
+        where: { id },
+        data: {
+          status: "FAILED",
+          failureReason: reason,
+          nextRunAt: null
+        }
+      });
+
+      if (isAppPayout) {
+        await tx.transaction.update({
+          where: { id: coordination.transactionId },
+          data: {
+            status: "UNDER_REVIEW",
+            failureReason: reason
+          }
+        });
+      }
+
+      await tx.transactionEvent.create({
+        data: {
+          transactionId: coordination.transactionId,
+          eventType: "payout_coordination.operator_action_required",
+          payload: {
+            payoutCoordinationId: coordination.id,
+            provider: coordination.provider,
+            reason,
+            attempts: coordination.attempts,
+            providerResponse: coordination.responsePayload
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      await tx.retryJob.create({
+        data: {
+          transactionId: coordination.transactionId,
+          queueName: "payout-coordination",
+          reason,
+          status: "FAILED",
+          attempts: coordination.attempts,
+          payload: {
+            payoutCoordinationId: coordination.id,
+            provider: coordination.provider,
+            providerResponse: coordination.responsePayload
+          } as Prisma.InputJsonValue
+        }
+      });
+    },
+    prismaTransactionOptions
+  );
+
+  if (isAppPayout) {
+    await enqueueAppPayoutWebhook(coordination.transactionId, "review_required");
+  }
+
+  return { processed: true, status: "UNDER_REVIEW" as const, reason };
 }
 
 async function failCoordination(id: string, reason: string, payload: Record<string, unknown>) {
