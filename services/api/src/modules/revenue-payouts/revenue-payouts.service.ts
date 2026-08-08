@@ -1,7 +1,9 @@
-import { Prisma, type GatewayProvider, type RevenuePayoutStatus } from "@prisma/client";
+import { Prisma, type GatewayProvider, type RevenuePayout, type RevenuePayoutStatus } from "@prisma/client";
 import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { getGatewayAdapter } from "../gateways/gateways.service.js";
+import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 
+const MAX_REVENUE_PAYOUT_ATTEMPTS = 6;
 const reservingStatuses: RevenuePayoutStatus[] = ["PENDING", "PROCESSING", "SUCCEEDED"];
 
 export async function getRevenuePayoutBalance(input: {
@@ -63,7 +65,7 @@ export async function listRevenuePayouts(organizationId?: string) {
 export async function processDueRevenuePayouts(limit = 25) {
   const items = await prisma.revenuePayout.findMany({
     where: {
-      attempts: { lt: 6 },
+      attempts: { lt: MAX_REVENUE_PAYOUT_ATTEMPTS },
       OR: [
         { status: "PENDING", nextRunAt: null },
         { status: { in: ["PENDING", "FAILED"] }, nextRunAt: { lte: new Date() } }
@@ -76,6 +78,24 @@ export async function processDueRevenuePayouts(limit = 25) {
 
   for (const item of items) {
     await processRevenuePayout(item.id);
+  }
+
+  const exhaustedItems = await prisma.revenuePayout.findMany({
+    where: {
+      status: "PENDING",
+      attempts: { gte: MAX_REVENUE_PAYOUT_ATTEMPTS },
+      OR: [{ nextRunAt: null }, { nextRunAt: { lte: new Date() } }]
+    },
+    select: { id: true },
+    orderBy: [{ updatedAt: "asc" }],
+    take: limit
+  });
+
+  for (const item of exhaustedItems) {
+    await markRevenuePayoutReviewRequired(
+      item.id,
+      "Provider accepted revenue payout but did not return a terminal confirmation after all retry attempts"
+    );
   }
 }
 
@@ -164,6 +184,138 @@ export async function createRevenuePayout(input: {
   );
 }
 
+export async function createAppRevenuePayout(input: {
+  appId: string;
+  organizationId: string;
+  appProfile: {
+    status: string;
+    providerAccesses: Array<{ provider: GatewayProvider; isEnabled: boolean }>;
+    capabilities: Array<{ capability: string; isEnabled: boolean }>;
+  };
+  idempotencyKey: string;
+  amount: number;
+  currency: string;
+  reference: string;
+  destinationProfileId?: string;
+  externalRecipientId?: string;
+  provider?: GatewayProvider;
+  metadata?: Record<string, unknown>;
+}) {
+  if (input.appProfile.status !== "ACTIVE") {
+    throw new Error("Application is suspended and cannot initiate payouts");
+  }
+
+  const payoutCapability = input.appProfile.capabilities.find((capability) => capability.capability === "PAYOUT");
+  if (payoutCapability && !payoutCapability.isEnabled) {
+    throw new Error("Application payout capability is disabled");
+  }
+
+  const appIdempotencyKey = `app-revenue-payout:${input.appId}:${input.idempotencyKey}`;
+  const existing = await prisma.revenuePayout.findUnique({
+    where: { idempotencyKey: appIdempotencyKey }
+  });
+
+  if (existing) {
+    return {
+      created: false,
+      response: serializeAppRevenuePayoutResponse(existing)
+    };
+  }
+
+  const destinationProfile = await prisma.destinationProfile.findFirst({
+    where: buildDestinationProfileLookup(input)
+  });
+
+  if (!destinationProfile) {
+    throw new Error("Destination profile was not found for this application");
+  }
+
+  if (destinationProfile.verificationStatus !== "VERIFIED") {
+    throw new Error("Destination profile is not verified for payouts");
+  }
+
+  const currency = input.currency.toUpperCase();
+  if (destinationProfile.regionalCurrency.toUpperCase() !== currency) {
+    throw new Error("Destination profile currency does not match payout currency");
+  }
+
+  const provider = input.provider ?? destinationProfile.providerType;
+  const appProviderAccess = input.appProfile.providerAccesses.find((access) => access.provider === provider);
+  if (appProviderAccess && !appProviderAccess.isEnabled) {
+    throw new Error(`Application access to ${provider} is disabled`);
+  }
+
+  const balance = await getRevenuePayoutBalance({
+    organizationId: input.organizationId,
+    currency
+  });
+
+  if (input.amount > balance.available) {
+    throw new Error(`Insufficient settled Mode 1 revenue for payout. Available ${balance.available} ${currency}`);
+  }
+
+  const payout = await prisma.$transaction(
+    async (tx) => {
+      const created = await tx.revenuePayout.create({
+        data: {
+          organizationId: input.organizationId,
+          payoutDestinationId: null,
+          provider,
+          amount: input.amount.toFixed(2),
+          currency,
+          idempotencyKey: appIdempotencyKey,
+          metadata: {
+            ...(input.metadata ?? {}),
+            source: "app_revenue_payout",
+            appId: input.appId,
+            externalReference: input.reference,
+            destinationProfileId: destinationProfile.id,
+            externalRecipientId: destinationProfile.externalRecipientId,
+            payoutTargetMasked: maskPayoutTarget(destinationProfile.payoutTarget)
+          } as Prisma.InputJsonValue,
+          requestPayload: {
+            reference: input.reference,
+            amount: input.amount,
+            currency,
+            destinationProfileId: destinationProfile.id,
+            externalRecipientId: destinationProfile.externalRecipientId,
+            destinationType: "destination_profile",
+            payoutTarget: maskPayoutTarget(destinationProfile.payoutTarget)
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorType: "APP",
+          actorId: input.appId,
+          action: "app_revenue_payout.created",
+          entityType: "RevenuePayout",
+          entityId: created.id,
+          payload: {
+            reference: input.reference,
+            amount: input.amount,
+            currency,
+            provider,
+            destinationProfileId: destinationProfile.id,
+            availableRevenueBeforePayout: balance.available
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return created;
+    },
+    prismaTransactionOptions
+  );
+
+  processRevenuePayout(payout.id).catch(() => undefined);
+
+  return {
+    created: true,
+    response: serializeAppRevenuePayoutResponse(payout)
+  };
+}
+
 export async function processRevenuePayout(id: string) {
   const payout = await prisma.revenuePayout.findUnique({
     where: { id },
@@ -181,8 +333,10 @@ export async function processRevenuePayout(id: string) {
     return { processed: false, status: payout.status, skipped: true };
   }
 
-  if (!payout.payoutDestination) {
+  const payoutTarget = await resolveRevenuePayoutTarget(payout);
+  if (!payoutTarget) {
     await failRevenuePayout(payout.id, "Payout destination is missing", {});
+    await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "failed");
     return { processed: true, status: "FAILED" as RevenuePayoutStatus, reason: "Payout destination is missing" };
   }
 
@@ -190,6 +344,7 @@ export async function processRevenuePayout(id: string) {
   if (!adapter.executePayout) {
     const reason = `${payout.provider} adapter does not support revenue payout execution`;
     await failRevenuePayout(payout.id, reason, { provider: payout.provider });
+    await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "failed");
     return { processed: true, status: "FAILED" as RevenuePayoutStatus, reason };
   }
 
@@ -213,28 +368,37 @@ export async function processRevenuePayout(id: string) {
     const result = await adapter.executePayout({
       transactionId: `revenue:${payout.id}`,
       payoutCoordinationId: payout.id,
-      payoutTarget: payout.payoutDestination.destinationRef,
+      payoutTarget: payoutTarget.value,
       amount: Number(payout.amount),
       currency: payout.currency,
       idempotencyKey: payout.idempotencyKey,
       metadata: {
         organizationId: payout.organizationId,
         payoutDestinationId: payout.payoutDestinationId,
-        payoutType: "PLATFORM_REVENUE_EXIT"
+        destinationProfileId: payoutTarget.destinationProfileId,
+        payoutType: isAppRevenuePayout(payout) ? "APP_PLATFORM_REVENUE_EXIT" : "PLATFORM_REVENUE_EXIT"
       }
     });
 
     const nextStatus = mapPayoutStatus(result.status);
+    const attemptNumber = payout.attempts + 1;
+    const pendingExhausted = nextStatus === "PENDING" && attemptNumber >= MAX_REVENUE_PAYOUT_ATTEMPTS;
+    const reviewReason =
+      "Provider accepted revenue payout but did not return a terminal confirmation after all retry attempts";
 
     await prisma.$transaction(
       async (tx) => {
         await tx.revenuePayout.update({
           where: { id: payout.id },
           data: {
-            status: nextStatus,
+            status: pendingExhausted ? "FAILED" : nextStatus,
             responsePayload: result.raw as Prisma.InputJsonValue,
-            failureReason: nextStatus === "FAILED" ? "Provider revenue payout execution failed" : null,
-            nextRunAt: nextStatus === "PENDING" ? nextRevenuePayoutAttemptAt(payout.attempts + 1) : null
+            failureReason: pendingExhausted
+              ? reviewReason
+              : nextStatus === "FAILED"
+                ? "Provider revenue payout execution failed"
+                : null,
+            nextRunAt: !pendingExhausted && nextStatus === "PENDING" ? nextRevenuePayoutAttemptAt(attemptNumber) : null
           }
         });
 
@@ -247,18 +411,45 @@ export async function processRevenuePayout(id: string) {
             payload: {
               provider: payout.provider,
               providerReference: result.providerReference,
-              status: nextStatus
+              status: pendingExhausted ? "UNDER_REVIEW" : nextStatus,
+              destinationType: payoutTarget.type
             }
           }
         });
+
+        if (pendingExhausted) {
+          await tx.retryJob.create({
+            data: {
+              transactionId: null,
+              queueName: "revenue-payout",
+              reason: reviewReason,
+              status: "FAILED",
+              attempts: attemptNumber,
+              payload: {
+                revenuePayoutId: payout.id,
+                provider: payout.provider,
+                providerReference: result.providerReference,
+                response: result.raw
+              } as Prisma.InputJsonValue
+            }
+          });
+        }
       },
       prismaTransactionOptions
     );
 
+    if (pendingExhausted) {
+      await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "review_required");
+    } else if (nextStatus === "SUCCEEDED") {
+      await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "success");
+    } else if (nextStatus === "FAILED") {
+      await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "failed");
+    }
+
     return { processed: true, status: nextStatus, providerReference: result.providerReference };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const retryable = payout.attempts + 1 < 6;
+    const retryable = payout.attempts + 1 < MAX_REVENUE_PAYOUT_ATTEMPTS;
 
     await prisma.revenuePayout.update({
       where: { id: payout.id },
@@ -269,6 +460,10 @@ export async function processRevenuePayout(id: string) {
         responsePayload: { error: reason }
       }
     });
+
+    if (!retryable) {
+      await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "failed");
+    }
 
     return { processed: true, status: "FAILED" as RevenuePayoutStatus, reason };
   }
@@ -282,6 +477,63 @@ function mapPayoutStatus(status: "PENDING" | "SUCCESS" | "FAILED"): RevenuePayou
 
 function nextRevenuePayoutAttemptAt(attempts: number) {
   return new Date(Date.now() + Math.min(attempts * 60_000, 15 * 60_000));
+}
+
+async function markRevenuePayoutReviewRequired(id: string, reason: string) {
+  const payout = await prisma.revenuePayout.findUnique({
+    where: { id }
+  });
+
+  if (!payout || payout.status !== "PENDING" || payout.attempts < MAX_REVENUE_PAYOUT_ATTEMPTS) {
+    return { processed: false, skipped: true };
+  }
+
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.revenuePayout.update({
+        where: { id },
+        data: {
+          status: "FAILED",
+          failureReason: reason,
+          nextRunAt: null
+        }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorType: "INTERNAL_SERVICE",
+          action: "revenue_payout.operator_action_required",
+          entityType: "RevenuePayout",
+          entityId: payout.id,
+          payload: {
+            reason,
+            attempts: payout.attempts,
+            providerResponse: payout.responsePayload
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      await tx.retryJob.create({
+        data: {
+          transactionId: null,
+          queueName: "revenue-payout",
+          reason,
+          status: "FAILED",
+          attempts: payout.attempts,
+          payload: {
+            revenuePayoutId: payout.id,
+            provider: payout.provider,
+            providerResponse: payout.responsePayload
+          } as Prisma.InputJsonValue
+        }
+      });
+    },
+    prismaTransactionOptions
+  );
+
+  await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "review_required");
+
+  return { processed: true, status: "UNDER_REVIEW" as const, reason };
 }
 
 async function failRevenuePayout(id: string, reason: string, payload: Record<string, unknown>) {
@@ -318,4 +570,119 @@ async function failRevenuePayout(id: string, reason: string, payload: Record<str
 function maskPayoutTarget(value: string) {
   if (value.length <= 6) return "***";
   return `${value.slice(0, 3)}...${value.slice(-3)}`;
+}
+
+function buildDestinationProfileLookup(input: {
+  appId: string;
+  destinationProfileId?: string;
+  externalRecipientId?: string;
+}) {
+  const candidates: Array<{ id: string } | { externalRecipientId: string }> = [];
+
+  if (input.destinationProfileId) {
+    candidates.push({ id: input.destinationProfileId });
+    candidates.push({ externalRecipientId: input.destinationProfileId });
+  }
+
+  if (input.externalRecipientId && input.externalRecipientId !== input.destinationProfileId) {
+    candidates.push({ externalRecipientId: input.externalRecipientId });
+  }
+
+  if (candidates.length === 0) {
+    throw new Error("destinationProfileId or externalRecipientId is required");
+  }
+
+  return {
+    appId: input.appId,
+    deletedAt: null,
+    OR: candidates
+  };
+}
+
+async function resolveRevenuePayoutTarget(
+  payout: RevenuePayout & { payoutDestination?: { destinationRef: string } | null }
+) {
+  if (payout.payoutDestination?.destinationRef) {
+    return {
+      type: "payout_destination",
+      value: payout.payoutDestination.destinationRef,
+      destinationProfileId: undefined
+    };
+  }
+
+  const metadata = asRecord(payout.metadata);
+  const destinationProfileId = typeof metadata.destinationProfileId === "string" ? metadata.destinationProfileId : null;
+  const appId = typeof metadata.appId === "string" ? metadata.appId : null;
+
+  if (!destinationProfileId || !appId) {
+    return null;
+  }
+
+  const profile = await prisma.destinationProfile.findFirst({
+    where: {
+      id: destinationProfileId,
+      appId,
+      organizationId: payout.organizationId,
+      deletedAt: null
+    }
+  });
+
+  if (!profile || profile.verificationStatus !== "VERIFIED" || !profile.payoutTarget) {
+    return null;
+  }
+
+  return {
+    type: "destination_profile",
+    value: profile.payoutTarget,
+    destinationProfileId: profile.id
+  };
+}
+
+function isAppRevenuePayout(payout: Pick<RevenuePayout, "metadata">) {
+  return asRecord(payout.metadata).source === "app_revenue_payout";
+}
+
+async function enqueueAppRevenuePayoutWebhookIfNeeded(revenuePayoutId: string, status: string) {
+  if (!webhookQueue) return;
+  const queue = webhookQueue;
+  const eventType = `payout.${status}`;
+  await addQueueJobSafely("webhook-queue", () =>
+    queue.add(
+      "dispatch-app-revenue-payout-webhook",
+      {
+        revenuePayoutId,
+        eventType
+      },
+      {
+        jobId: `webhook:revenue-payout:${revenuePayoutId}:${eventType}`
+      }
+    )
+  );
+}
+
+function serializeAppRevenuePayoutResponse(payout: RevenuePayout) {
+  const metadata = asRecord(payout.metadata);
+  return {
+    id: payout.id,
+    reference: typeof metadata.externalReference === "string" ? metadata.externalReference : payout.id,
+    flowpayReference: payout.id,
+    provider: payout.provider,
+    status: mapAppRevenuePayoutStatus(payout.status),
+    amount: Number(payout.amount),
+    currency: payout.currency
+  };
+}
+
+function mapAppRevenuePayoutStatus(status: RevenuePayoutStatus): "pending" | "queued" | "processing" | "failed" {
+  if (status === "FAILED" || status === "CANCELLED") return "failed";
+  if (status === "PROCESSING") return "processing";
+  return "pending";
+}
+
+function asRecord(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  return {};
 }

@@ -3,7 +3,7 @@ import { Worker } from "bullmq";
 import { createRedisConnection } from "../config/redis.js";
 import { prisma } from "../config/db.js";
 import { reconcileTransaction } from "../modules/transactions/reconciliation.service.js";
-import { dispatchAppWebhook } from "../modules/webhooks/app-webhook.service.js";
+import { dispatchAppRevenuePayoutWebhook, dispatchAppWebhook } from "../modules/webhooks/app-webhook.service.js";
 import { processGatewayWebhook } from "../modules/webhooks/gateway-webhook.service.js";
 import { processDuePayoutCoordinations } from "../modules/payouts/payout-coordination.service.js";
 import { executeAsynchronousCharge } from "../modules/checkout/checkout.service.js";
@@ -83,6 +83,14 @@ if (!retryWorkerConnection || !webhookWorkerConnection) {
       if (job.name === "dispatch-app-webhook") {
         return dispatchAppWebhook({
           transactionId: job.data.transactionId,
+          eventType: job.data.eventType,
+          attempt: job.attemptsMade + 1
+        });
+      }
+
+      if (job.name === "dispatch-app-revenue-payout-webhook") {
+        return dispatchAppRevenuePayoutWebhook({
+          revenuePayoutId: job.data.revenuePayoutId,
           eventType: job.data.eventType,
           attempt: job.attemptsMade + 1
         });
