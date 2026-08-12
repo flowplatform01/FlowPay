@@ -13,8 +13,14 @@ const envSchema = z.object({
   APP_SECRET_ENCRYPTION_KEY: z.string().min(16).optional(),
   WEBHOOK_SIGNING_SECRET: z.string().optional(),
   FLOWPAY_INTERNAL_TOKEN: z.string().min(16),
-  FLOWPAY_PUBLIC_URL: z.string().url(),
-  FLOW_ADMIN_URL: z.string().url(),
+  FLOWPAY_PUBLIC_URL: z.preprocess(
+    (val) => (typeof val === "string" && val.trim() !== "" ? val : undefined),
+    z.string().url().default("http://localhost:3010")
+  ),
+  FLOW_ADMIN_URL: z.preprocess(
+    (val) => (typeof val === "string" && val.trim() !== "" ? val : undefined),
+    z.string().url().default("http://localhost:5001")
+  ),
   FLOWPAY_WEBHOOK_BASE_URL: z.preprocess(
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.string().url().optional()
@@ -66,7 +72,10 @@ const envSchema = z.object({
   CINETPAY_SITE_ID: z.string().optional(),
   GATEWAY_REQUEST_TIMEOUT_MS: z.coerce.number().default(30_000),
   PORT: z.coerce.number().default(3011),
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development")
+  NODE_ENV: z.preprocess(
+    (val) => (typeof val === "string" ? val.toLowerCase().trim() : val),
+    z.enum(["development", "test", "production"]).default("development")
+  )
 });
 
 const parsed = envSchema.parse(process.env);
