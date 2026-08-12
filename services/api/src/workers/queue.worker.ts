@@ -1,4 +1,5 @@
 import "../config/network.js";
+import http from "node:http";
 import { Worker } from "bullmq";
 import { createRedisConnection } from "../config/redis.js";
 import { prisma } from "../config/db.js";
@@ -320,3 +321,19 @@ async function expireStalePendingCheckoutSessions() {
     console.log(`[Worker] Expired ${expired} stale pending hosted checkout session(s).`);
   }
 }
+
+const healthPort = Number(process.env.PORT || 3012);
+const healthServer = http.createServer((req, res) => {
+  if (req.url === "/health" || req.url === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", service: "flowpay-worker" }));
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+healthServer.listen(healthPort, () => {
+  console.log(`[Worker] Health check server listening on port ${healthPort}`);
+});
+
