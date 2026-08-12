@@ -3,7 +3,7 @@ import { buildApp } from "./app.js";
 import { env } from "./config/env.js";
 import { connectWithRetry } from "./config/db.js";
 
-// Wait for database to be fully awake (handles Neon cold-start) before accepting traffic
+// Wait for database to be fully awake (handles managed DB cold-start) before accepting traffic
 await connectWithRetry();
 
 const app = await buildApp();

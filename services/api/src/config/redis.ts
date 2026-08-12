@@ -54,9 +54,7 @@ function getRedisConnectionConfig(mode: "health" | "queue" | "startup" = "health
   }
 
   const redisUrl = new URL(env.REDIS_URL);
-  const shouldUseTls =
-    redisUrl.protocol === "rediss:" ||
-    redisUrl.hostname.toLowerCase().includes("upstash.io");
+  const shouldUseTls = redisUrl.protocol === "rediss:";
 
   return {
     lazyConnect: mode === "startup",

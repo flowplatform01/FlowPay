@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 
 /**
- * Resilient Prisma client for Neon/serverless databases.
+ * Resilient Prisma client for managed/serverless PostgreSQL databases.
  *
  * Query retries are intentionally narrow: retry once for transient connection
  * failures, then surface the error. Startup uses bounded attempts with a per
@@ -65,7 +65,7 @@ export const prisma = new PrismaClient().$extends({
   }
 });
 
-/** Neon/serverless DB needs longer interactive transactions than Prisma's 5s default. */
+/** Managed/serverless DB benefits from longer interactive transactions than Prisma's 5s default. */
 export const prismaTransactionOptions = {
   maxWait: 10_000,
   timeout: 30_000

@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3010",
     "build": "next build",
-    "start": "next start -p 3010"
+    "start": "next start -p ${PORT:-3010}"
   },
   "dependencies": {
     "framer-motion": "^12.38.0",
