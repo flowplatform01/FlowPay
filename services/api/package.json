@@ -13,6 +13,8 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:seed": "tsx prisma/seed.ts",
+    "bootstrap:providers": "tsx scripts/bootstrap-provider-registry.ts",
+    "check:providers": "tsx scripts/check-provider-registry.ts",
     "verify:campay": "tsx scripts/verify-campay.ts",
     "test:contract": "node scripts/confirmation-gateway.contract.mjs",
     "zero:fees": "tsx scripts/zero-all-fees.ts"

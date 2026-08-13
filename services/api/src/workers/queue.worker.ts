@@ -1,6 +1,7 @@
 import "../config/network.js";
 import http from "node:http";
 import { Worker } from "bullmq";
+import { env } from "../config/env.js";
 import { createRedisConnection } from "../config/redis.js";
 import { prisma } from "../config/db.js";
 import { reconcileTransaction } from "../modules/transactions/reconciliation.service.js";
@@ -322,7 +323,7 @@ async function expireStalePendingCheckoutSessions() {
   }
 }
 
-const healthPort = Number(process.env.PORT || 3012);
+const healthPort = env.WORKER_HEALTH_PORT;
 const healthServer = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -336,4 +337,3 @@ const healthServer = http.createServer((req, res) => {
 healthServer.listen(healthPort, () => {
   console.log(`[Worker] Health check server listening on port ${healthPort}`);
 });
-

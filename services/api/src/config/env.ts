@@ -72,6 +72,7 @@ const envSchema = z.object({
   CINETPAY_SITE_ID: z.string().optional(),
   GATEWAY_REQUEST_TIMEOUT_MS: z.coerce.number().default(30_000),
   PORT: z.coerce.number().default(3011),
+  WORKER_HEALTH_PORT: z.coerce.number().default(3012),
   NODE_ENV: z.preprocess(
     (val) => (typeof val === "string" ? val.toLowerCase().trim() : val),
     z.enum(["development", "test", "production"]).default("development")
