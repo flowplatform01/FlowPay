@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { env } from "./env.js";
 
 /**
  * Resilient Prisma client for managed/serverless PostgreSQL databases.
@@ -39,7 +40,27 @@ function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string)
   });
 }
 
-export const prisma = new PrismaClient().$extends({
+function databaseUrlWithPoolLimits(rawUrl: string) {
+  const url = new URL(rawUrl);
+
+  if (!url.searchParams.has("connection_limit")) {
+    url.searchParams.set("connection_limit", String(env.DB_POOL_CONNECTION_LIMIT));
+  }
+
+  if (!url.searchParams.has("pool_timeout")) {
+    url.searchParams.set("pool_timeout", String(env.DB_POOL_TIMEOUT_SECONDS));
+  }
+
+  return url.toString();
+}
+
+export const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: databaseUrlWithPoolLimits(env.DATABASE_URL)
+    }
+  }
+}).$extends({
   query: {
     $allModels: {
       async $allOperations({ model, operation, args, query }) {

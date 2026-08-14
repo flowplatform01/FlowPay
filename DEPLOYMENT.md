@@ -93,6 +93,8 @@ This guide covers deploying the entire FlowPay infrastructure for online product
 | `FLOWPAY_WEBHOOK_BASE_URL` | Public API URL for gateway webhooks | `https://api.flowpay.com` |
 | `NODE_ENV` | Runtime mode | `production` |
 
+FlowPay applies an internal conservative Prisma pool cap by default to avoid exhausting small managed Postgres plans. Only set `DB_POOL_CONNECTION_LIMIT` or `DB_POOL_TIMEOUT_SECONDS` if intentionally tuning a larger production database plan.
+
 ---
 
 ### 4. FlowPay Background Worker (Northflank or Render Background Worker)

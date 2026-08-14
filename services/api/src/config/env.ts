@@ -71,6 +71,8 @@ const envSchema = z.object({
   CINETPAY_SECRET: z.string().optional(),
   CINETPAY_SITE_ID: z.string().optional(),
   GATEWAY_REQUEST_TIMEOUT_MS: z.coerce.number().default(30_000),
+  DB_POOL_CONNECTION_LIMIT: z.coerce.number().int().positive().default(3),
+  DB_POOL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(20),
   PORT: z.coerce.number().default(3011),
   WORKER_HEALTH_PORT: z.coerce.number().default(3012),
   NODE_ENV: z.preprocess(
