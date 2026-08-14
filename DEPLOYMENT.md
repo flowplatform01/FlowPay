@@ -65,6 +65,7 @@ This guide covers deploying the entire FlowPay infrastructure for online product
 - **Service Type**: Render Web Service
 - **Environment**: Node
 - **Root Directory**: `FlowPay` (or repository root)
+- **Dockerfile**: `FlowPay/Dockerfile` if deploying with Docker
 - **Build Command**:
   ```bash
   npm install && npm run build --workspace @flowpay/api
@@ -100,6 +101,7 @@ The worker processes BullMQ jobs (transaction retries, webhook dispatch, async c
 
 - **Service Type**: Background Worker (Northflank Service / Render Background Worker)
 - **Environment**: Node
+- **Dockerfile**: `FlowPay/Dockerfile.worker` if deploying with Docker, or override the command to the worker start command below
 - **Build Command**:
   ```bash
   npm install && npm run build --workspace @flowpay/api

@@ -11,5 +11,6 @@ COPY apps ./apps
 RUN npm ci
 RUN npm run build --workspace @flowpay/api
 
-# Default start command for worker (can be overridden in Northflank/Render)
-CMD ["npm", "run", "start:worker", "--workspace", "@flowpay/api"]
+# Default start command for the FlowPay API web service.
+# The background worker must use Dockerfile.worker or explicitly override this command.
+CMD ["npm", "run", "start", "--workspace", "@flowpay/api"]
