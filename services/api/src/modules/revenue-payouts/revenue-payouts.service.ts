@@ -365,20 +365,24 @@ export async function processRevenuePayout(id: string) {
   }
 
   try {
-    const result = await adapter.executePayout({
-      transactionId: `revenue:${payout.id}`,
-      payoutCoordinationId: payout.id,
-      payoutTarget: payoutTarget.value,
-      amount: Number(payout.amount),
-      currency: payout.currency,
-      idempotencyKey: payout.idempotencyKey,
-      metadata: {
-        organizationId: payout.organizationId,
-        payoutDestinationId: payout.payoutDestinationId,
-        destinationProfileId: payoutTarget.destinationProfileId,
-        payoutType: isAppRevenuePayout(payout) ? "APP_PLATFORM_REVENUE_EXIT" : "PLATFORM_REVENUE_EXIT"
-      }
-    });
+    const existingProviderReference = readProviderReference(payout.responsePayload);
+    const result =
+      existingProviderReference && adapter.getTransactionStatus
+        ? await adapter.getTransactionStatus(existingProviderReference)
+        : await adapter.executePayout({
+            transactionId: `revenue:${payout.id}`,
+            payoutCoordinationId: payout.id,
+            payoutTarget: payoutTarget.value,
+            amount: Number(payout.amount),
+            currency: payout.currency,
+            idempotencyKey: payout.idempotencyKey,
+            metadata: {
+              organizationId: payout.organizationId,
+              payoutDestinationId: payout.payoutDestinationId,
+              destinationProfileId: payoutTarget.destinationProfileId,
+              payoutType: isAppRevenuePayout(payout) ? "APP_PLATFORM_REVENUE_EXIT" : "PLATFORM_REVENUE_EXIT"
+            }
+          });
 
     const nextStatus = mapPayoutStatus(result.status);
     const attemptNumber = payout.attempts + 1;
@@ -469,6 +473,96 @@ export async function processRevenuePayout(id: string) {
   }
 }
 
+export async function processRevenuePayoutProviderWebhook(
+  provider: GatewayProvider,
+  payload: Record<string, unknown>
+) {
+  const providerReference = readProviderReference(payload);
+  const externalReference = readExternalReference(payload);
+  const mappedStatus = mapProviderPayloadPayoutStatus(payload);
+
+  if (!providerReference && !externalReference) {
+    return { processed: false, reason: "No revenue payout reference found in webhook payload" };
+  }
+
+  const payout = await findRevenuePayoutForProviderEvent({
+    provider,
+    providerReference,
+    externalReference
+  });
+
+  if (!payout) {
+    return { processed: false, reason: "Revenue payout not found for webhook payload" };
+  }
+
+  if (payout.status === mappedStatus) {
+    return {
+      processed: true,
+      revenuePayoutId: payout.id,
+      status: mappedStatus,
+      deduplicated: true
+    };
+  }
+
+  if (payout.status === "SUCCEEDED" && mappedStatus !== "SUCCEEDED") {
+    return {
+      processed: false,
+      revenuePayoutId: payout.id,
+      status: payout.status,
+      reason: `Ignored revenue payout transition from terminal status ${payout.status}`
+    };
+  }
+
+  const responsePayload = {
+    ...asRecord(payout.responsePayload),
+    providerReference: providerReference ?? readProviderReference(payout.responsePayload),
+    webhook: payload
+  };
+
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.revenuePayout.update({
+        where: { id: payout.id },
+        data: {
+          status: mappedStatus,
+          responsePayload: responsePayload as Prisma.InputJsonValue,
+          failureReason: mappedStatus === "FAILED" ? readFailureReason(payload) : null,
+          nextRunAt: mappedStatus === "PENDING" ? payout.nextRunAt : null
+        }
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorType: "GATEWAY",
+          actorId: provider,
+          action: "revenue_payout.gateway_webhook_processed",
+          entityType: "RevenuePayout",
+          entityId: payout.id,
+          payload: {
+            provider,
+            providerReference,
+            externalReference,
+            mappedStatus
+          } as Prisma.InputJsonValue
+        }
+      });
+    },
+    prismaTransactionOptions
+  );
+
+  if (mappedStatus === "SUCCEEDED") {
+    await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "success");
+  } else if (mappedStatus === "FAILED") {
+    await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "failed");
+  }
+
+  return {
+    processed: true,
+    revenuePayoutId: payout.id,
+    status: mappedStatus
+  };
+}
+
 function mapPayoutStatus(status: "PENDING" | "SUCCESS" | "FAILED"): RevenuePayoutStatus {
   if (status === "SUCCESS") return "SUCCEEDED";
   if (status === "FAILED") return "FAILED";
@@ -477,6 +571,72 @@ function mapPayoutStatus(status: "PENDING" | "SUCCESS" | "FAILED"): RevenuePayou
 
 function nextRevenuePayoutAttemptAt(attempts: number) {
   return new Date(Date.now() + Math.min(attempts * 60_000, 15 * 60_000));
+}
+
+function readProviderReference(payload: unknown) {
+  const data = asRecord(payload);
+  const reference =
+    data.transId ??
+    data.providerReference ??
+    data.reference ??
+    data.transaction_id ??
+    data.transactionId ??
+    data.payment_token;
+  return typeof reference === "string" && reference.trim() ? reference.trim() : null;
+}
+
+function readExternalReference(payload: Record<string, unknown>) {
+  const reference =
+    payload.externalId ??
+    payload.external_id ??
+    payload.externalReference ??
+    payload.external_reference ??
+    payload.order_id;
+  return typeof reference === "string" && reference.trim() ? reference.trim() : null;
+}
+
+function mapProviderPayloadPayoutStatus(payload: Record<string, unknown>): RevenuePayoutStatus {
+  const raw = String(payload.status ?? payload.payment_status ?? payload.transaction_status ?? payload.event ?? "").toUpperCase();
+  if (raw.includes("SUCCESS") || raw.includes("COMPLETED") || raw.includes("PAID")) return "SUCCEEDED";
+  if (raw.includes("FAIL") || raw.includes("CANCEL") || raw.includes("REJECT") || raw.includes("EXPIRED")) return "FAILED";
+  return "PENDING";
+}
+
+function readFailureReason(payload: Record<string, unknown>) {
+  const reason = payload.reason ?? payload.message ?? payload.error ?? payload.description;
+  return typeof reason === "string" && reason.trim() ? reason.trim() : "Gateway reported payout failure";
+}
+
+async function findRevenuePayoutForProviderEvent(input: {
+  provider: GatewayProvider;
+  providerReference: string | null;
+  externalReference: string | null;
+}) {
+  const lookupClauses: Prisma.RevenuePayoutWhereInput[] = [];
+
+  if (input.externalReference) {
+    lookupClauses.push({ idempotencyKey: input.externalReference });
+    lookupClauses.push({ metadata: { path: ["externalReference"], equals: input.externalReference } });
+  }
+
+  if (input.providerReference) {
+    lookupClauses.push({ responsePayload: { path: ["transId"], equals: input.providerReference } });
+    lookupClauses.push({ responsePayload: { path: ["providerReference"], equals: input.providerReference } });
+    lookupClauses.push({ responsePayload: { path: ["reference"], equals: input.providerReference } });
+  }
+
+  if (lookupClauses.length === 0) {
+    return null;
+  }
+
+  return prisma.revenuePayout.findFirst({
+    where: {
+      provider: input.provider,
+      status: { in: ["PENDING", "PROCESSING", "FAILED", "SUCCEEDED"] },
+      OR: lookupClauses
+    },
+    orderBy: { updatedAt: "desc" }
+  });
 }
 
 async function markRevenuePayoutReviewRequired(id: string, reason: string) {

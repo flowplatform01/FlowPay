@@ -136,6 +136,9 @@ FLOWPAY_INTERNAL_TOKEN=...
 FLOWPAY_PUBLIC_URL=https://<flowpay-checkout-url>
 FLOW_ADMIN_URL=https://<flow-admin-url>
 FLOWPAY_WEBHOOK_BASE_URL=https://<flowpay-api-url>
+FAPSHI_API_KEY_USER=...
+FAPSHI_API_KEY=...
+FAPSHI_WEBHOOK_SECRET=...
 NODE_ENV=production
 ```
 
@@ -148,10 +151,20 @@ JWT_SECRET=...
 ENCRYPTION_KEY=...
 WEBHOOK_SIGNING_SECRET=...
 FLOWPAY_INTERNAL_TOKEN=...
+FAPSHI_API_KEY_USER=...
+FAPSHI_API_KEY=...
+FAPSHI_WEBHOOK_SECRET=...
 NODE_ENV=production
 ```
 
 FlowPay automatically applies a conservative Prisma connection pool cap. Do not add DB pool variables unless deliberately tuning a larger database plan.
+
+Provider credentials must be present on both FlowPay API and FlowPay Worker.
+The API creates hosted checkout sessions, but the Worker executes queued provider captures and payouts.
+If API has provider credentials but Worker does not, checkout can initialize successfully and then fail during confirmation with a provider-not-configured message.
+
+`WEBHOOK_SIGNING_SECRET` is FlowPay platform/internal fallback key material. Do not give it to onboarded applications.
+Each onboarded application receives its own `fwhsec_...` webhook secret during app onboarding or webhook-secret rotation, and that per-app secret is what the application must configure as its `FLOWPAY_WEBHOOK_SECRET`.
 
 Flow Admin Backend:
 
@@ -191,6 +204,7 @@ Expected:
 
 - FlowPay API listens on `3011`.
 - FlowPay Worker health listens on `3012`.
+- FlowPay Worker `/health` reports gateway runtime readiness without exposing credentials.
 - Flow Admin frontend listens on `5173`.
 - Flow Admin backend listens on `5001`.
 

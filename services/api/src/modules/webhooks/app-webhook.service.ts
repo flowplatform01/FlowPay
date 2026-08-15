@@ -1,7 +1,7 @@
 import type { Prisma, TransactionStatus } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { prisma } from "../../config/db.js";
-import { signPayload } from "../../utils/crypto.js";
+import { decryptSecret, signPayload } from "../../utils/crypto.js";
 
 type AppWebhookPayload = {
   id: string;
@@ -76,6 +76,7 @@ export async function dispatchAppWebhook(input: {
   };
 
   const body = JSON.stringify(payload);
+  const signingSecret = await getAppWebhookSigningSecret(transaction.appId);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
 
@@ -87,7 +88,7 @@ export async function dispatchAppWebhook(input: {
         "user-agent": "FlowPay-Webhooks/1.0",
         "x-flowpay-event-id": payload.id,
         "x-flowpay-event-type": input.eventType,
-        "x-flowpay-signature": signPayload(body, env.WEBHOOK_SIGNING_SECRET)
+        "x-flowpay-signature": signPayload(body, signingSecret)
       },
       body,
       signal: controller.signal
@@ -213,6 +214,7 @@ export async function dispatchAppRevenuePayoutWebhook(input: {
     }
   };
   const body = JSON.stringify(payload);
+  const signingSecret = await getAppWebhookSigningSecret(appId);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
 
@@ -224,7 +226,7 @@ export async function dispatchAppRevenuePayoutWebhook(input: {
         "user-agent": "FlowPay-Webhooks/1.0",
         "x-flowpay-event-id": payload.id,
         "x-flowpay-event-type": input.eventType,
-        "x-flowpay-signature": signPayload(body, env.WEBHOOK_SIGNING_SECRET)
+        "x-flowpay-signature": signPayload(body, signingSecret)
       },
       body,
       signal: controller.signal
@@ -272,6 +274,25 @@ export async function dispatchAppRevenuePayoutWebhook(input: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function getAppWebhookSigningSecret(appId: string) {
+  const credential = await prisma.apiKey.findFirst({
+    where: {
+      appId,
+      type: "WEBHOOK",
+      revokedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }]
+    },
+    orderBy: { createdAt: "desc" },
+    select: { encryptedKey: true }
+  });
+
+  if (credential?.encryptedKey) {
+    return decryptSecret(credential.encryptedKey);
+  }
+
+  return env.WEBHOOK_SIGNING_SECRET;
 }
 
 async function recordWebhookDispatch(input: {

@@ -1,6 +1,6 @@
 import { ApiKeyType, Prisma, type GatewayProvider } from "@prisma/client";
 import { prisma } from "../../config/db.js";
-import { generateOpaqueKey, hashSecret } from "../../utils/crypto.js";
+import { encryptSecret, generateOpaqueKey, hashSecret } from "../../utils/crypto.js";
 import { recordAuditEvent } from "../audit/audit.service.js";
 import { GATEWAY_PROVIDERS } from "../providers/provider-registry.js";
 
@@ -60,7 +60,12 @@ export async function createAppRegistration(input: {
         create: [
           { label: "Public key", type: "PUBLIC", hashedKey: hashSecret(publicKey) },
           { label: "Secret key", type: "SECRET", hashedKey: hashSecret(secretKey) },
-          { label: "Webhook secret", type: "WEBHOOK", hashedKey: hashSecret(webhookSecret) }
+          {
+            label: "Webhook secret",
+            type: "WEBHOOK",
+            hashedKey: hashSecret(webhookSecret),
+            encryptedKey: encryptSecret(webhookSecret)
+          }
         ]
       },
       providerAccesses: {
@@ -327,7 +332,8 @@ export async function rotateAppCredentials(
               : keyType === "WEBHOOK"
                 ? "Webhook secret"
                 : "Secret key",
-          hashedKey: hashSecret(value)
+          hashedKey: hashSecret(value),
+          encryptedKey: keyType === "WEBHOOK" ? encryptSecret(value) : undefined
         }
       });
 
@@ -444,7 +450,18 @@ export async function updateAppAccess(
 const appInclude = {
   organization: true,
   apiKeys: {
-    orderBy: { createdAt: "desc" as const }
+    orderBy: { createdAt: "desc" as const },
+    select: {
+      id: true,
+      appId: true,
+      type: true,
+      label: true,
+      hashedKey: true,
+      lastUsedAt: true,
+      expiresAt: true,
+      revokedAt: true,
+      createdAt: true
+    }
   },
   providerAccesses: {
     orderBy: [{ priority: "asc" as const }, { provider: "asc" as const }]

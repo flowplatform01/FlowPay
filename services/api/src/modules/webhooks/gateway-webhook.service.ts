@@ -3,13 +3,23 @@ import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
 import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
+import { processRevenuePayoutProviderWebhook } from "../revenue-payouts/revenue-payouts.service.js";
 
 type GatewayProviderValue = GatewayProvider;
+
+type GatewayWebhookResult = {
+  processed: boolean;
+  reason?: string;
+  transactionId?: string;
+  revenuePayoutId?: string;
+  status?: string;
+  deduplicated?: boolean;
+};
 
 export async function processGatewayWebhook(
   provider: GatewayProviderValue,
   payload: Record<string, unknown>
-) {
+): Promise<GatewayWebhookResult> {
   const providerReference = extractProviderReference(provider, payload);
   const externalReference = extractExternalReference(payload);
   const mappedStatus = mapProviderStatus(provider, payload);
@@ -38,7 +48,12 @@ export async function processGatewayWebhook(
   });
 
   if (!transaction) {
-    return { processed: false, reason: "Transaction not found for webhook payload" };
+    const payoutResult = await processRevenuePayoutProviderWebhook(provider, payload);
+    if (payoutResult.processed) {
+      return payoutResult;
+    }
+
+    return { processed: false, reason: "Transaction or revenue payout not found for webhook payload" };
   }
 
   if (transaction.selectedProvider !== provider) {

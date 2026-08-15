@@ -86,7 +86,7 @@ This guide covers deploying the entire FlowPay infrastructure for online product
 | `REDIS_URL` | Aiven Redis connection URI | `rediss://default:pass@host:6379` |
 | `JWT_SECRET` | Secret key for signing API tokens | `random-32-char-secret-string` |
 | `ENCRYPTION_KEY` | 32-char key for DB secret encryption | `32-character-secret-key-string!` |
-| `WEBHOOK_SIGNING_SECRET` | Secret for signing outgoing app webhooks | `random-secret-key` |
+| `WEBHOOK_SIGNING_SECRET` | Legacy fallback signing secret and internal fallback; app webhooks should use each app's generated `fwhsec_...` credential | `random-secret-key` |
 | `FLOWPAY_INTERNAL_TOKEN` | Shared secret with Flow Admin | `shared-internal-token-32chars` |
 | `FLOWPAY_PUBLIC_URL` | Production URL of FlowPay Checkout | `https://checkout.flowpay.com` |
 | `FLOW_ADMIN_URL` | Production URL of Flow Admin | `https://admin.flowpay.com` |

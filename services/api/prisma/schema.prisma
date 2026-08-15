@@ -259,6 +259,7 @@ model ApiKey {
   type       ApiKeyType
   label      String
   hashedKey  String
+  encryptedKey String?
   lastUsedAt DateTime?
   expiresAt  DateTime?
   revokedAt  DateTime?

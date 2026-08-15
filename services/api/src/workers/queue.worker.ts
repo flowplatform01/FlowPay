@@ -11,6 +11,7 @@ import { processDuePayoutCoordinations } from "../modules/payouts/payout-coordin
 import { executeAsynchronousCharge } from "../modules/checkout/checkout.service.js";
 import { processDueRevenuePayouts } from "../modules/revenue-payouts/revenue-payouts.service.js";
 import { expireStalePendingCheckoutTransactions } from "../modules/transactions/transactions.service.js";
+import { GATEWAY_PROVIDERS, providerHasOperationalRuntime } from "../modules/providers/provider-registry.js";
 
 const retryWorkerConnection = createRedisConnection("worker:retry");
 const webhookWorkerConnection = createRedisConnection("worker:webhook");
@@ -327,7 +328,16 @@ const healthPort = env.WORKER_HEALTH_PORT;
 const healthServer = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "flowpay-worker" }));
+    res.end(JSON.stringify({
+      status: "ok",
+      service: "flowpay-worker",
+      gateways: Object.fromEntries(
+        GATEWAY_PROVIDERS.map((provider) => [
+          provider,
+          providerHasOperationalRuntime(provider) ? "provider-runtime" : "not-configured"
+        ])
+      )
+    }));
     return;
   }
   res.writeHead(404);
