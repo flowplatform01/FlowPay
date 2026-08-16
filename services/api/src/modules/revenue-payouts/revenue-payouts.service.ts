@@ -316,6 +316,29 @@ export async function createAppRevenuePayout(input: {
   };
 }
 
+export async function getAppRevenuePayoutStatus(input: {
+  appId: string;
+  organizationId: string;
+  payoutId: string;
+}) {
+  const payout = await prisma.revenuePayout.findFirst({
+    where: {
+      id: input.payoutId,
+      organizationId: input.organizationId,
+      metadata: {
+        path: ["appId"],
+        equals: input.appId
+      }
+    }
+  });
+
+  if (!payout) {
+    return null;
+  }
+
+  return serializeAppRevenuePayoutResponse(payout);
+}
+
 export async function processRevenuePayout(id: string) {
   const payout = await prisma.revenuePayout.findUnique({
     where: { id },
@@ -803,21 +826,35 @@ function isAppRevenuePayout(payout: Pick<RevenuePayout, "metadata">) {
 }
 
 async function enqueueAppRevenuePayoutWebhookIfNeeded(revenuePayoutId: string, status: string) {
-  if (!webhookQueue) return;
-  const queue = webhookQueue;
   const eventType = `payout.${status}`;
-  await addQueueJobSafely("webhook-queue", () =>
-    queue.add(
-      "dispatch-app-revenue-payout-webhook",
-      {
-        revenuePayoutId,
-        eventType
-      },
-      {
-        jobId: `webhook:revenue-payout:${revenuePayoutId}:${eventType}`
-      }
-    )
-  );
+  if (webhookQueue) {
+    const queue = webhookQueue;
+    const result = await addQueueJobSafely("webhook-queue", () =>
+      queue.add(
+        "dispatch-app-revenue-payout-webhook",
+        {
+          revenuePayoutId,
+          eventType
+        },
+        {
+          jobId: `webhook:revenue-payout:${revenuePayoutId}:${eventType}`
+        }
+      )
+    );
+
+    if (result.enqueued) return;
+  }
+
+  try {
+    const { dispatchAppRevenuePayoutWebhook } = await import("../webhooks/app-webhook.service.js");
+    await dispatchAppRevenuePayoutWebhook({
+      revenuePayoutId,
+      eventType,
+      attempt: 1
+    });
+  } catch {
+    // dispatchAppRevenuePayoutWebhook records failed attempts in RetryJob; keep payout finality independent.
+  }
 }
 
 function serializeAppRevenuePayoutResponse(payout: RevenuePayout) {
@@ -833,7 +870,8 @@ function serializeAppRevenuePayoutResponse(payout: RevenuePayout) {
   };
 }
 
-function mapAppRevenuePayoutStatus(status: RevenuePayoutStatus): "pending" | "queued" | "processing" | "failed" {
+function mapAppRevenuePayoutStatus(status: RevenuePayoutStatus): "pending" | "queued" | "processing" | "success" | "failed" {
+  if (status === "SUCCEEDED") return "success";
   if (status === "FAILED" || status === "CANCELLED") return "failed";
   if (status === "PROCESSING") return "processing";
   return "pending";

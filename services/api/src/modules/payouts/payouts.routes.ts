@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { GatewayProvider } from "@prisma/client";
 import { z } from "zod";
 import { verifyAppSecretKey } from "../auth/app-auth.guard.js";
-import { createAppRevenuePayout } from "../revenue-payouts/revenue-payouts.service.js";
+import { createAppRevenuePayout, getAppRevenuePayoutStatus } from "../revenue-payouts/revenue-payouts.service.js";
 
 const createPayoutSchema = z.object({
   amount: z.number().positive(),
@@ -15,6 +15,26 @@ const createPayoutSchema = z.object({
 });
 
 export async function registerPayoutRoutes(app: FastifyInstance) {
+  app.get("/payouts/:id", { preHandler: [verifyAppSecretKey] }, async (request, reply) => {
+    const { id } = request.params as { id?: string };
+
+    if (!id || !request.appAuth) {
+      return reply.code(400).send({ message: "Invalid payout reference" });
+    }
+
+    const payout = await getAppRevenuePayoutStatus({
+      appId: request.appAuth.appId,
+      organizationId: request.appAuth.organizationId,
+      payoutId: id
+    });
+
+    if (!payout) {
+      return reply.code(404).send({ message: "Payout not found" });
+    }
+
+    return payout;
+  });
+
   app.post("/payouts", { preHandler: [verifyAppSecretKey] }, async (request, reply) => {
     const parsed = createPayoutSchema.safeParse(request.body);
 
