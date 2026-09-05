@@ -14,7 +14,8 @@ export const updateOrganizationSettingsSchema = z.object({
     .array(
       z.object({
         provider: z.nativeEnum(GatewayProvider),
-        isEnabled: z.boolean()
+        isEnabled: z.boolean(),
+        runtimeMode: z.enum(["SANDBOX", "LIVE"]).nullable().optional()
       })
     )
     .optional()

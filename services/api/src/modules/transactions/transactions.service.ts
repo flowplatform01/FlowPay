@@ -49,6 +49,7 @@ export async function createTransaction(input: {
   amount: number;
   currency: string;
   provider: GatewayProvider;
+  paymentMethod?: string;
   externalRecipientId?: string;
   customerName?: string;
   customerEmail?: string;
@@ -113,7 +114,6 @@ export async function createTransaction(input: {
   if (appProviderAccess && !appProviderAccess.isEnabled) {
     throw new Error(`Application access to ${route.provider} is disabled`);
   }
-
   const [organizationProviderAccess, gateway, feeRule, destination] = await Promise.all([
     getCachedRoutingDependency(
       `organization-provider-access:${input.organizationId}:${route.provider}`,
@@ -159,6 +159,9 @@ export async function createTransaction(input: {
   if (organizationProviderAccess && !organizationProviderAccess.isEnabled) {
     throw new Error(`Organization access to ${route.provider} is disabled`);
   }
+
+  const providerRuntimeMode =
+    normalizeRuntimeMode(appProviderAccess?.runtimeMode) ?? normalizeRuntimeMode(organizationProviderAccess?.runtimeMode);
 
   assertProviderCanAcceptTraffic(route.provider, gateway);
 
@@ -208,7 +211,8 @@ export async function createTransaction(input: {
           hostedCheckout: true,
           checkoutSessionToken
         }
-      : {})
+      : {}),
+    ...(providerRuntimeMode ? { providerRuntimeMode } : {})
   };
 
   const transaction = await createTransactionRecord({
@@ -309,7 +313,10 @@ export async function createTransaction(input: {
     currency: input.currency,
     customerPhone,
     customerEmail: input.customerEmail,
-    externalReference: input.externalReference
+    customerName: input.customerName,
+    externalReference: input.externalReference,
+    paymentMethod: input.paymentMethod,
+    runtimeMode: providerRuntimeMode
   });
   timer.mark("provider-charge");
 
@@ -685,6 +692,12 @@ const zeroDecimalCurrencies = new Set(["BIF", "CLP", "DJF", "GNF", "JPY", "KMF",
 function asNumber(value: unknown) {
   const parsed = typeof value === "number" ? value : Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeRuntimeMode(value: unknown): "sandbox" | "live" | null {
+  if (value === "SANDBOX" || value === "sandbox") return "sandbox";
+  if (value === "LIVE" || value === "live") return "live";
+  return null;
 }
 
 export async function getTransactionById(id: string) {

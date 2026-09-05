@@ -42,7 +42,11 @@ export async function reconcileTransaction(input: {
   }
 
   const latestAttempt = transaction.paymentAttempts[0];
-  const providerStatus = await fetchProviderStatus(transaction.selectedProvider, latestAttempt?.gatewayReference);
+  const providerStatus = await fetchProviderStatus(
+    transaction.selectedProvider,
+    latestAttempt?.gatewayReference,
+    readProviderRuntimeMode(transaction.metadata)
+  );
   const providerInferredStatus = mapGatewayStatus(providerStatus.result);
 
   if (
@@ -257,7 +261,8 @@ export async function reconcileTransaction(input: {
 
 async function fetchProviderStatus(
   provider: GatewayProvider,
-  providerReference?: string | null
+  providerReference?: string | null,
+  runtimeMode?: "sandbox" | "live" | null
 ) {
   if (!providerReference) {
     return { result: null, error: null };
@@ -269,12 +274,19 @@ async function fetchProviderStatus(
   }
 
   try {
-    const result = await adapter.getTransactionStatus(providerReference);
+    const result = await adapter.getTransactionStatus(providerReference, runtimeMode);
     return { result, error: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Provider status lookup failed";
     return { result: null, error: message };
   }
+}
+
+function readProviderRuntimeMode(metadata: unknown): "sandbox" | "live" | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const value = (metadata as Record<string, unknown>).providerRuntimeMode;
+  if (value === "sandbox" || value === "live") return value;
+  return null;
 }
 
 function mapGatewayStatus(result: GatewayStatusResult | null): TransactionStatus | null {

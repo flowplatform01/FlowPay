@@ -86,16 +86,21 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
     }
 
     const providerPhone = formatFapshiCameroonPhone(input.customerPhone);
-    const response = await this.requestJson<FapshiInitiationResponse>("/direct-pay", {
-      amount: Math.round(input.amount),
-      phone: providerPhone,
-      medium: resolveFapshiMedium(input),
-      name: input.customerName ?? undefined,
-      email: input.customerEmail ?? undefined,
-      userId: sanitizeFapshiReference(providerPhone),
-      externalId: sanitizeFapshiReference(input.transactionId),
-      message: `FlowPay ${input.externalReference}`.slice(0, 120)
-    });
+    const response = await this.requestJson<FapshiInitiationResponse>(
+      "/direct-pay",
+      {
+        amount: Math.round(input.amount),
+        phone: providerPhone,
+        medium: resolveFapshiMedium(input),
+        name: input.customerName ?? undefined,
+        email: input.customerEmail ?? undefined,
+        userId: sanitizeFapshiReference(providerPhone),
+        externalId: sanitizeFapshiReference(input.transactionId),
+        message: `FlowPay ${input.externalReference}`.slice(0, 120)
+      },
+      "POST",
+      input.runtimeMode
+    );
 
     const providerReference = response.body.transId ?? `FAPSHI-${input.transactionId}`;
 
@@ -114,8 +119,13 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
     };
   }
 
-  async getTransactionStatus(providerReference: string): Promise<GatewayStatusResult> {
-    const response = await this.requestJson<FapshiTransaction>(`/payment-status/${encodeURIComponent(providerReference)}`, undefined, "GET");
+  async getTransactionStatus(providerReference: string, runtimeMode?: FapshiRuntimeMode | null): Promise<GatewayStatusResult> {
+    const response = await this.requestJson<FapshiTransaction>(
+      `/payment-status/${encodeURIComponent(providerReference)}`,
+      undefined,
+      "GET",
+      runtimeMode
+    );
     const raw = response.body;
 
     if (!response.ok) {
@@ -146,14 +156,19 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
     }
 
     const providerPhone = formatFapshiCameroonPhone(input.payoutTarget);
-    const response = await this.requestJson<FapshiInitiationResponse>("/payout", {
-      amount: Math.round(input.amount),
-      phone: providerPhone,
-      medium: resolveFapshiPayoutMedium(input),
-      externalId: sanitizeFapshiReference(input.idempotencyKey),
-      userId: sanitizeFapshiReference(input.destinationProfileId ?? input.transactionId),
-      message: `FlowPay payout ${input.transactionId}`.slice(0, 120)
-    });
+    const response = await this.requestJson<FapshiInitiationResponse>(
+      "/payout",
+      {
+        amount: Math.round(input.amount),
+        phone: providerPhone,
+        medium: resolveFapshiPayoutMedium(input),
+        externalId: sanitizeFapshiReference(input.idempotencyKey),
+        userId: sanitizeFapshiReference(input.destinationProfileId ?? input.transactionId),
+        message: `FlowPay payout ${input.transactionId}`.slice(0, 120)
+      },
+      "POST",
+      input.runtimeMode
+    );
 
     const providerReference = response.body.transId ?? `FAPSHI-PAYOUT-${input.payoutCoordinationId}`;
 
@@ -195,9 +210,10 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
   private async requestJson<T>(
     path: string,
     body?: Record<string, unknown>,
-    method: "GET" | "POST" = "POST"
+    method: "GET" | "POST" = "POST",
+    runtimeMode?: FapshiRuntimeMode | null
   ): Promise<{ ok: boolean; status: number; body: T & Record<string, unknown> }> {
-    const runtime = await this.resolveRuntime();
+    const runtime = await this.resolveRuntime(runtimeMode);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), env.GATEWAY_REQUEST_TIMEOUT_MS);
 
@@ -224,8 +240,8 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
     }
   }
 
-  private async resolveRuntime() {
-    return this.staticRuntime ?? resolveFapshiRuntime();
+  private async resolveRuntime(runtimeMode?: FapshiRuntimeMode | null) {
+    return this.staticRuntime ?? resolveFapshiRuntime(runtimeMode);
   }
 }
 
@@ -309,8 +325,8 @@ export function createFapshiAdapter() {
   return new FapshiGatewayAdapter();
 }
 
-async function resolveFapshiRuntime(): Promise<FapshiRuntime> {
-  const mode = await readFapshiModeFromProviderConfig();
+async function resolveFapshiRuntime(runtimeMode?: FapshiRuntimeMode | null): Promise<FapshiRuntime> {
+  const mode = runtimeMode ?? (await readFapshiModeFromProviderConfig());
 
   if (mode === "live") {
     if (!env.FAPSHI_LIVE_API_USER || !env.FAPSHI_LIVE_API_KEY) {

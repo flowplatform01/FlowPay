@@ -79,7 +79,8 @@ export const updateAppAccessSchema = z.object({
       z.object({
         provider: z.nativeEnum(GatewayProvider),
         isEnabled: z.boolean(),
-        priority: z.number().int().positive().optional()
+        priority: z.number().int().positive().optional(),
+        runtimeMode: z.enum(["SANDBOX", "LIVE"]).nullable().optional()
       })
     )
     .optional(),

@@ -120,6 +120,7 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
         amount: parsed.data.amount,
         currency: parsed.data.currency,
         provider,
+        paymentMethod: parsed.data.paymentMethod,
         externalRecipientId: parsed.data.externalRecipientId,
         customerName: parsed.data.customerName,
         customerEmail: parsed.data.customerEmail,

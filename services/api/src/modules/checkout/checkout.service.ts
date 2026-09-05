@@ -38,6 +38,7 @@ type TransactionMetadata = {
   __flowpay_credit_purchase?: boolean;
   purchaseIntentId?: string;
   __flowpay_confirmation_gateway?: string;
+  providerRuntimeMode?: "sandbox" | "live";
 };
 
 export function createCheckoutSessionToken() {
@@ -351,6 +352,7 @@ export async function executeAsynchronousCharge(input: {
   });
 
   const adapter = getGatewayAdapter(input.provider);
+  const transactionMetadata = readTransactionMetadata(transaction.metadata);
   let result;
 
   try {
@@ -365,6 +367,7 @@ export async function executeAsynchronousCharge(input: {
       customerName: transaction.customerName,
       externalReference: transaction.externalReference,
       paymentMethod: input.paymentMethod,
+      runtimeMode: transactionMetadata.providerRuntimeMode,
       phase: "capture"
     });
     timer.mark("provider-capture");

@@ -97,6 +97,7 @@ export async function updateOrganizationSettings(
     enabledProviders?: Array<{
       provider: GatewayProvider;
       isEnabled: boolean;
+      runtimeMode?: "SANDBOX" | "LIVE" | null;
     }>;
   }
 ) {
@@ -119,12 +120,14 @@ export async function updateOrganizationSettings(
           }
         },
         update: {
-          isEnabled: provider.isEnabled
+          isEnabled: provider.isEnabled,
+          runtimeMode: provider.runtimeMode === undefined ? undefined : provider.runtimeMode
         },
         create: {
           organizationId,
           provider: provider.provider,
-          isEnabled: provider.isEnabled
+          isEnabled: provider.isEnabled,
+          runtimeMode: provider.runtimeMode ?? null
         }
       });
     }

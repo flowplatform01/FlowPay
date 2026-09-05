@@ -9,9 +9,9 @@ const MAX_PAYOUT_ATTEMPTS = 6;
 type CoordinationForProcessing = Prisma.PayoutCoordinationGetPayload<{
   include: {
     destinationProfile: true;
-    transaction: {
-      include: {
-        settlements: true;
+        transaction: {
+          include: {
+            settlements: true;
       };
     };
   };
@@ -126,6 +126,7 @@ export async function processPayoutCoordination(id: string) {
   try {
     const attemptedProviders: Array<Record<string, unknown>> = [];
     const providerCandidates = resolvePayoutProviderCandidates(coordination);
+    const providerRuntimeMode = readProviderRuntimeMode(coordination.transaction.metadata);
     let selectedProvider: GatewayProvider | null = null;
     let result: GatewayPayoutResult | null = null;
 
@@ -149,12 +150,14 @@ export async function processPayoutCoordination(id: string) {
         amount: Number(coordination.transaction.settlementAmount),
         currency: coordination.transaction.currency,
         idempotencyKey: `${coordination.idempotencyKey}:${candidate}`,
+        runtimeMode: providerRuntimeMode,
         metadata: {
           externalRecipientId: destinationProfile.externalRecipientId,
           settlementStrategy: destinationProfile.settlementStrategy,
           primaryProvider: coordination.provider,
           attemptedProvider: candidate,
-          fallbackUsed: candidate !== coordination.provider
+          fallbackUsed: candidate !== coordination.provider,
+          ...(providerRuntimeMode ? { providerRuntimeMode } : {})
         }
       });
 
@@ -586,6 +589,13 @@ function asRecord(value: unknown) {
   }
 
   return {};
+}
+
+function readProviderRuntimeMode(metadata: unknown): "sandbox" | "live" | null {
+  const value = asRecord(metadata).providerRuntimeMode;
+  if (value === "SANDBOX" || value === "sandbox") return "sandbox";
+  if (value === "LIVE" || value === "live") return "live";
+  return null;
 }
 
 function isGatewayProvider(value: unknown): value is GatewayProvider {

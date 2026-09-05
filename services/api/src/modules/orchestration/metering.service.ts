@@ -1,6 +1,7 @@
-import { GatewayProvider, Prisma, type OrchestrationMeterEventType } from "@prisma/client";
+import { Prisma, type OrchestrationMeterEventType } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { prisma } from "../../config/db.js";
+import { getRevenuePayoutBalance } from "../revenue-payouts/revenue-payouts.service.js";
 
 const DEFAULT_PROCESSING_UNITS = 1;
 const DEFAULT_ORCHESTRATION_CREDITS = 1;
@@ -9,7 +10,7 @@ type MeteringBalanceRow = {
   infrastructureUsageBalanceBefore: Prisma.Decimal;
   infrastructureUsageBalanceAfter: Prisma.Decimal;
 };
-type MeteringWriter = Pick<typeof prisma, "app" | "treasuryLedgerEntry" | "auditLog">;
+type MeteringWriter = Pick<typeof prisma, "app" | "settlement" | "revenuePayout" | "auditLog">;
 
 export async function assertApplicationHasInfrastructureCapacity(appId: string) {
   const app = await prisma.app.findUniqueOrThrow({
@@ -110,6 +111,7 @@ async function maybeAutoRefillCredits(
     where: { id: input.appId },
     select: {
       infrastructureUsageBalance: true,
+      organizationId: true,
       processingUnits: true,
       orchestrationCredits: true,
       autoCreditRefillEnabled: true,
@@ -150,8 +152,16 @@ async function maybeAutoRefillCredits(
     return;
   }
 
-  const treasuryBalance = await getTreasuryBalanceForProvider(tx, "XAF", app.autoCreditRefillProvider);
-  if (treasuryBalance < refillAmount) {
+  const revenueBalance = await getRevenuePayoutBalance(
+    {
+      organizationId: app.organizationId,
+      appId: input.appId,
+      currency: "XAF"
+    },
+    tx
+  );
+
+  if (revenueBalance.available < refillAmount) {
     return;
   }
 
@@ -160,7 +170,17 @@ async function maybeAutoRefillCredits(
     processingUnits: current.processingUnits + Math.ceil(refillAmount),
     orchestrationCredits: current.orchestrationCredits + refillAmount
   };
-  const reference = `treasury:auto-credit-refill:${input.appId}:${randomUUID()}`;
+  const reference = input.transactionId
+    ? `app-revenue:auto-credit-refill:${input.appId}:${input.transactionId}:${input.eventType}`
+    : `app-revenue:auto-credit-refill:${input.appId}:${randomUUID()}`;
+  const existingRefill = await tx.revenuePayout.findUnique({
+    where: { idempotencyKey: reference },
+    select: { id: true }
+  });
+
+  if (existingRefill) {
+    return;
+  }
 
   await tx.app.update({
     where: { id: input.appId },
@@ -171,23 +191,36 @@ async function maybeAutoRefillCredits(
     }
   });
 
-  await tx.treasuryLedgerEntry.create({
+  await tx.revenuePayout.create({
     data: {
-      entryType: "APP_CREDIT_REFILL",
-      direction: "DEBIT",
-      status: "SETTLED",
+      organizationId: app.organizationId,
+      appId: input.appId,
+      payoutDestinationId: null,
       provider: app.autoCreditRefillProvider,
-      currency: "XAF",
       amount: refillAmount.toFixed(2),
-      reference,
-      description: `Automatic treasury-funded credit refill for app ${input.appId}`,
+      currency: "XAF",
+      status: "SUCCEEDED",
+      idempotencyKey: reference,
+      requestPayload: {
+        source: "APP_PLATFORM_REVENUE",
+        destination: "APP_OPERATIONAL_CREDITS",
+        amount: refillAmount,
+        currency: "XAF"
+      } as Prisma.InputJsonValue,
+      responsePayload: {
+        internalAllocation: true,
+        status: "SUCCEEDED"
+      } as Prisma.InputJsonValue,
       metadata: {
+        source: "app_credit_refill_from_revenue",
         appId: input.appId,
+        organizationId: app.organizationId,
         provider: app.autoCreditRefillProvider,
         transactionId: input.transactionId ?? null,
         eventType: input.eventType,
         trigger: wouldFail ? "WOULD_DEPLETE" : "BELOW_THRESHOLD",
         threshold,
+        availableAppRevenueBeforeRefill: revenueBalance.available,
         before: current,
         after
       } as Prisma.InputJsonValue
@@ -197,7 +230,7 @@ async function maybeAutoRefillCredits(
   await tx.auditLog.create({
     data: {
       actorType: "INTERNAL_SERVICE",
-      action: "treasury.app_credit_refill_auto_funded",
+      action: "app_revenue.credit_refill_auto_funded",
       entityType: "App",
       entityId: input.appId,
       payload: {
@@ -206,30 +239,10 @@ async function maybeAutoRefillCredits(
         provider: app.autoCreditRefillProvider,
         reference,
         transactionId: input.transactionId ?? null,
+        availableAppRevenueBeforeRefill: revenueBalance.available,
         before: current,
         after
       } as Prisma.InputJsonValue
     }
   });
-}
-
-async function getTreasuryBalanceForProvider(
-  tx: MeteringWriter,
-  currency: string,
-  provider: GatewayProvider
-) {
-  const groups = await tx.treasuryLedgerEntry.groupBy({
-    by: ["direction", "status"],
-    where: {
-      currency,
-      provider,
-      status: { in: ["AVAILABLE", "SETTLED"] }
-    },
-    _sum: { amount: true }
-  });
-
-  return groups.reduce((total, group) => {
-    const amount = Number(group._sum.amount ?? 0);
-    return total + (group.direction === "CREDIT" ? amount : -amount);
-  }, 0);
 }

@@ -24,6 +24,7 @@ import { z } from "zod";
 import { prisma } from "../../config/db.js";
 import { resolveProviderFromPaymentMethod } from "../payments/payment-channels.js";
 import { randomUUID } from "crypto";
+import { normalizePhoneNumber } from "../../utils/phone.js";
 
 export async function registerAppRoutes(app: FastifyInstance) {
   app.get("/internal/apps", { preHandler: [verifyInternalService] }, async () => listApps());
@@ -83,13 +84,24 @@ export async function registerAppRoutes(app: FastifyInstance) {
   });
 
   app.post("/internal/apps/:id/purchase-credits", { preHandler: [verifyInternalService] }, async (request, reply) => {
-    const parsed = z.object({ amountXaf: z.number().positive() }).safeParse(request.body);
+    const parsed = z.object({
+      amountXaf: z.number().positive(),
+      customerPhone: z.string().min(6),
+      customerEmail: z.string().email().optional(),
+      customerName: z.string().min(2).optional(),
+      paymentMethod: z.enum(["MTN_MOMO", "ORANGE_MONEY"]).default("MTN_MOMO")
+    }).safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ message: "Invalid purchase payload" });
     }
 
     const { id } = request.params as { id: string };
-    const { amountXaf } = parsed.data;
+    const { amountXaf, paymentMethod } = parsed.data;
+    const customerPhone = normalizePhoneNumber(parsed.data.customerPhone);
+
+    if (!customerPhone || !/^\+2376\d{8}$/.test(customerPhone)) {
+      return reply.code(400).send({ message: "Customer phone must be a valid Cameroon mobile money number" });
+    }
 
     // Resolve app + org to satisfy createTransaction's required fields
     const appRecord = await prisma.app.findUniqueOrThrow({
@@ -101,9 +113,14 @@ export async function registerAppRoutes(app: FastifyInstance) {
       }
     });
 
-    const purchase = await initiateCreditPurchase(id, { amountXaf });
+    const purchase = await initiateCreditPurchase(id, {
+      amountXaf,
+      customerPhone,
+      customerEmail: parsed.data.customerEmail,
+      customerName: parsed.data.customerName ?? "FlowPay App Administrator"
+    });
 
-    const defaultProvider = resolveProviderFromPaymentMethod("MTN_MOMO");
+    const defaultProvider = resolveProviderFromPaymentMethod(paymentMethod);
 
     const transaction = await createTransaction({
       appId: id,
@@ -113,8 +130,11 @@ export async function registerAppRoutes(app: FastifyInstance) {
       amount: amountXaf,
       currency: "XAF",
       provider: defaultProvider,
+      paymentMethod,
       deferCapture: true,
-      customerName: "FlowPay App Administrator",
+      customerName: parsed.data.customerName ?? "FlowPay App Administrator",
+      customerEmail: parsed.data.customerEmail,
+      customerPhone,
       metadata: purchase.instructions.metadata as Record<string, unknown>,
       appProfile: appRecord
     });

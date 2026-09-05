@@ -379,6 +379,7 @@ export async function updateAppAccess(
       provider: GatewayProvider;
       isEnabled: boolean;
       priority?: number;
+      runtimeMode?: "SANDBOX" | "LIVE" | null;
     }>;
     capabilities?: Array<{
       capability: string;
@@ -397,13 +398,15 @@ export async function updateAppAccess(
         },
         update: {
           isEnabled: provider.isEnabled,
-          priority: provider.priority ?? 100
+          priority: provider.priority ?? 100,
+          runtimeMode: provider.runtimeMode === undefined ? undefined : provider.runtimeMode
         },
         create: {
           appId,
           provider: provider.provider,
           isEnabled: provider.isEnabled,
-          priority: provider.priority ?? 100
+          priority: provider.priority ?? 100,
+          runtimeMode: provider.runtimeMode ?? null
         }
       });
     }

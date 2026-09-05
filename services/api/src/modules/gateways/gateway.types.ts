@@ -11,6 +11,7 @@ export type GatewayChargeInput = {
   customerName?: string | null;
   externalReference: string;
   paymentMethod?: string | null;
+  runtimeMode?: "sandbox" | "live" | null;
   phase?: GatewayChargePhase;
 };
 
@@ -33,6 +34,7 @@ export type GatewayPayoutInput = {
   amount: number;
   currency: string;
   idempotencyKey: string;
+  runtimeMode?: "sandbox" | "live" | null;
   metadata?: Record<string, unknown>;
 };
 
@@ -52,7 +54,7 @@ export type GatewayBalanceResult = {
 export interface GatewayAdapter {
   provider: GatewayProvider;
   charge(input: GatewayChargeInput): Promise<GatewayChargeResult>;
-  getTransactionStatus?(providerReference: string): Promise<GatewayStatusResult>;
+  getTransactionStatus?(providerReference: string, runtimeMode?: "sandbox" | "live" | null): Promise<GatewayStatusResult>;
   executePayout?(input: GatewayPayoutInput): Promise<GatewayPayoutResult>;
   getBalance?(): Promise<GatewayBalanceResult>;
   verifyWebhookSignature(payload: string, signature?: string): boolean;

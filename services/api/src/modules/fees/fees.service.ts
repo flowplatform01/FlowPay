@@ -22,16 +22,26 @@ export function calculateFees({
   const percentageFee = normalize((baseAmount * percentageRate) / 100);
   const platformFee = normalize(flatAmount + percentageFee);
   // gateway* fields are FlowPay's configured route-pricing layer for a provider
-  // route. They are not a live pass-through estimate of the external provider's
-  // own commercial charges.
-  const gatewayPercentageFee = normalize((baseAmount * gatewayPercentageRate) / 100);
-  const gatewayFeeAmount = normalize(gatewayFlatAmount + gatewayPercentageFee);
+  // route. Percentage-based provider fees are grossed up so that the configured
+  // net amount plus FlowPay platform fee remain whole after provider charges.
+  const gatewayRate = gatewayPercentageRate / 100;
+  if (gatewayRate >= 1) {
+    throw new Error("Gateway percentage rate must be less than 100%");
+  }
+
+  const netBeforeGatewayFee = baseAmount + platformFee;
+  const grossBeforeRounding =
+    gatewayRate > 0
+      ? (netBeforeGatewayFee + gatewayFlatAmount) / (1 - gatewayRate)
+      : netBeforeGatewayFee + gatewayFlatAmount;
+  const grossAmount = normalize(grossBeforeRounding);
+  const gatewayFeeAmount = normalize(grossAmount - netBeforeGatewayFee);
 
   return {
     baseAmount,
     gatewayFeeAmount,
     platformFeeAmount: platformFee,
-    grossAmount: normalize(baseAmount + platformFee + gatewayFeeAmount)
+    grossAmount
   };
 }
 

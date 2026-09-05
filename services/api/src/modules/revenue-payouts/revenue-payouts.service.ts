@@ -5,33 +5,52 @@ import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 
 const MAX_REVENUE_PAYOUT_ATTEMPTS = 6;
 const reservingStatuses: RevenuePayoutStatus[] = ["PENDING", "PROCESSING", "SUCCEEDED"];
+type RevenuePayoutBalanceReader = Pick<typeof prisma, "settlement" | "revenuePayout">;
 
 export async function getRevenuePayoutBalance(input: {
   organizationId: string;
+  appId?: string;
   currency: string;
-}) {
+}, db: RevenuePayoutBalanceReader = prisma) {
   const currency = input.currency.toUpperCase();
+  const transactionWhere: Prisma.TransactionWhereInput = {
+    orchestrationMode: "PLATFORM_REVENUE",
+    status: "SUCCEEDED",
+    currency,
+    ...(input.appId ? { appId: input.appId } : {})
+  };
+  const revenuePayoutWhere: Prisma.RevenuePayoutWhereInput = {
+    organizationId: input.organizationId,
+    currency,
+    status: { in: reservingStatuses },
+    ...(input.appId
+      ? {
+          OR: [
+            { appId: input.appId },
+            {
+              metadata: {
+                path: ["appId"],
+                equals: input.appId
+              }
+            }
+          ]
+        }
+      : {})
+  };
+
   const [settledPlatformRevenue, reservedPayouts] = await Promise.all([
-    prisma.settlement.aggregate({
+    db.settlement.aggregate({
       where: {
         organizationId: input.organizationId,
         status: "SETTLED",
-        transaction: {
-          orchestrationMode: "PLATFORM_REVENUE",
-          status: "SUCCEEDED",
-          currency
-        }
+        transaction: transactionWhere
       },
       _sum: {
         settlementAmount: true
       }
     }),
-    prisma.revenuePayout.aggregate({
-      where: {
-        organizationId: input.organizationId,
-        currency,
-        status: { in: reservingStatuses }
-      },
+    db.revenuePayout.aggregate({
+      where: revenuePayoutWhere,
       _sum: {
         amount: true
       }
@@ -43,6 +62,7 @@ export async function getRevenuePayoutBalance(input: {
 
   return {
     organizationId: input.organizationId,
+    appId: input.appId,
     currency,
     collected,
     reserved,
@@ -189,7 +209,7 @@ export async function createAppRevenuePayout(input: {
   organizationId: string;
   appProfile: {
     status: string;
-    providerAccesses: Array<{ provider: GatewayProvider; isEnabled: boolean }>;
+    providerAccesses: Array<{ provider: GatewayProvider; isEnabled: boolean; runtimeMode?: unknown }>;
     capabilities: Array<{ capability: string; isEnabled: boolean }>;
   };
   idempotencyKey: string;
@@ -244,9 +264,25 @@ export async function createAppRevenuePayout(input: {
   if (appProviderAccess && !appProviderAccess.isEnabled) {
     throw new Error(`Application access to ${provider} is disabled`);
   }
+  const organizationProviderAccess = await prisma.organizationProviderAccess.findUnique({
+    where: {
+      organizationId_provider: {
+        organizationId: input.organizationId,
+        provider
+      }
+    }
+  });
+
+  if (organizationProviderAccess && !organizationProviderAccess.isEnabled) {
+    throw new Error(`Organization access to ${provider} is disabled`);
+  }
+
+  const providerRuntimeMode =
+    normalizeRuntimeMode(appProviderAccess?.runtimeMode) ?? normalizeRuntimeMode(organizationProviderAccess?.runtimeMode);
 
   const balance = await getRevenuePayoutBalance({
     organizationId: input.organizationId,
+    appId: input.appId,
     currency
   });
 
@@ -259,6 +295,7 @@ export async function createAppRevenuePayout(input: {
       const created = await tx.revenuePayout.create({
         data: {
           organizationId: input.organizationId,
+          appId: input.appId,
           payoutDestinationId: null,
           provider,
           amount: input.amount.toFixed(2),
@@ -269,6 +306,7 @@ export async function createAppRevenuePayout(input: {
             source: "app_revenue_payout",
             appId: input.appId,
             externalReference: input.reference,
+            providerRuntimeMode,
             destinationProfileId: destinationProfile.id,
             externalRecipientId: destinationProfile.externalRecipientId,
             payoutTargetMasked: maskPayoutTarget(destinationProfile.payoutTarget)
@@ -298,7 +336,8 @@ export async function createAppRevenuePayout(input: {
             currency,
             provider,
             destinationProfileId: destinationProfile.id,
-            availableRevenueBeforePayout: balance.available
+            appId: input.appId,
+            availableAppRevenueBeforePayout: balance.available
           } as Prisma.InputJsonValue
         }
       });
@@ -325,10 +364,15 @@ export async function getAppRevenuePayoutStatus(input: {
     where: {
       id: input.payoutId,
       organizationId: input.organizationId,
-      metadata: {
-        path: ["appId"],
-        equals: input.appId
-      }
+      OR: [
+        { appId: input.appId },
+        {
+          metadata: {
+            path: ["appId"],
+            equals: input.appId
+          }
+        }
+      ]
     }
   });
 
@@ -389,9 +433,10 @@ export async function processRevenuePayout(id: string) {
 
   try {
     const existingProviderReference = readProviderReference(payout.responsePayload);
+    const providerRuntimeMode = readProviderRuntimeMode(payout.metadata);
     const result =
       existingProviderReference && adapter.getTransactionStatus
-        ? await adapter.getTransactionStatus(existingProviderReference)
+        ? await adapter.getTransactionStatus(existingProviderReference, providerRuntimeMode)
         : await adapter.executePayout({
             transactionId: `revenue:${payout.id}`,
             payoutCoordinationId: payout.id,
@@ -399,10 +444,13 @@ export async function processRevenuePayout(id: string) {
             amount: Number(payout.amount),
             currency: payout.currency,
             idempotencyKey: payout.idempotencyKey,
+            runtimeMode: providerRuntimeMode,
             metadata: {
               organizationId: payout.organizationId,
+              appId: payout.appId,
               payoutDestinationId: payout.payoutDestinationId,
               destinationProfileId: payoutTarget.destinationProfileId,
+              providerRuntimeMode,
               payoutType: isAppRevenuePayout(payout) ? "APP_PLATFORM_REVENUE_EXIT" : "PLATFORM_REVENUE_EXIT"
             }
           });
@@ -875,6 +923,16 @@ function mapAppRevenuePayoutStatus(status: RevenuePayoutStatus): "pending" | "qu
   if (status === "FAILED" || status === "CANCELLED") return "failed";
   if (status === "PROCESSING") return "processing";
   return "pending";
+}
+
+function readProviderRuntimeMode(metadata: unknown): "sandbox" | "live" | null {
+  return normalizeRuntimeMode(asRecord(metadata).providerRuntimeMode);
+}
+
+function normalizeRuntimeMode(value: unknown): "sandbox" | "live" | null {
+  if (value === "SANDBOX" || value === "sandbox") return "sandbox";
+  if (value === "LIVE" || value === "live") return "live";
+  return null;
 }
 
 function asRecord(value: unknown) {
