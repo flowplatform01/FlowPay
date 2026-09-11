@@ -15,6 +15,7 @@ type TreasuryTransactionInput = {
   selectedProvider: string;
   appId: string;
   organizationId: string;
+  livemode?: boolean;
 };
 
 type CreateTreasuryWithdrawalInput = {
@@ -59,6 +60,7 @@ export async function recordPlatformFeeCapture(
       entryType: "PLATFORM_FEE_CAPTURED",
       direction: "CREDIT",
       status: "AVAILABLE",
+      livemode: transaction.livemode ?? true,
       provider: transaction.selectedProvider as GatewayProvider,
       currency: transaction.currency,
       amount: transaction.platformFeeAmount,
@@ -98,7 +100,8 @@ export async function reconcileTreasuryLedger(input?: { limit?: number }) {
       externalReference: true,
       selectedProvider: true,
       appId: true,
-      organizationId: true
+      organizationId: true,
+      livemode: true
     },
     orderBy: { createdAt: "asc" },
     take: limit
@@ -110,6 +113,7 @@ export async function reconcileTreasuryLedger(input?: { limit?: number }) {
           entryType: "PLATFORM_FEE_CAPTURED",
           direction: "CREDIT",
           status: "AVAILABLE",
+          livemode: transaction.livemode,
           provider: transaction.selectedProvider,
           currency: transaction.currency,
           amount: transaction.platformFeeAmount,
@@ -183,6 +187,7 @@ export async function createTreasuryWithdrawal(input: CreateTreasuryWithdrawalIn
         entryType: "WITHDRAWAL_RESERVED",
         direction: "DEBIT",
         status: "AVAILABLE",
+        livemode: true,
         provider: input.provider,
         currency,
         amount: withdrawal.amount,
@@ -370,10 +375,11 @@ export async function getTreasuryOverview() {
   ] = await Promise.all([
     prisma.treasuryLedgerEntry.groupBy({
       by: ["provider", "currency", "direction", "status", "entryType"],
+      where: { livemode: true },
       _sum: { amount: true },
       _count: { _all: true }
     }),
-    prisma.treasuryLedgerEntry.count(),
+    prisma.treasuryLedgerEntry.count({ where: { livemode: true } }),
     prisma.treasuryLedgerEntry.findMany({
       include: {
         transaction: {
@@ -381,6 +387,7 @@ export async function getTreasuryOverview() {
             externalReference: true,
             selectedProvider: true,
             status: true,
+            livemode: true,
             app: { select: { name: true } },
             organization: { select: { name: true } }
           }
@@ -393,6 +400,7 @@ export async function getTreasuryOverview() {
     countMissingTreasuryCaptures(),
     prisma.transaction.aggregate({
       where: {
+        livemode: true,
         status: { in: ["PENDING", "REQUIRES_ACTION", "PROCESSING", "UNDER_REVIEW"] },
         platformFeeAmount: { gt: 0 }
       },
@@ -524,6 +532,7 @@ export async function getTreasuryOverview() {
       entryType: entry.entryType,
       direction: entry.direction,
       status: entry.status,
+      livemode: entry.livemode,
       provider: entry.provider ?? entry.transaction?.selectedProvider ?? entry.withdrawal?.provider ?? null,
       currency: entry.currency,
       amount: entry.amount.toString(),
@@ -597,6 +606,7 @@ async function markTreasuryWithdrawalSucceeded(
         entryType: "WITHDRAWAL_EXECUTED",
         direction: "DEBIT",
         status: "SETTLED",
+        livemode: true,
         provider: withdrawal.provider,
         currency: withdrawal.currency,
         amount: withdrawal.amount,
@@ -757,6 +767,7 @@ export async function fundAppCreditsFromTreasury(input: FundAppCreditsFromTreasu
         entryType: "APP_CREDIT_REFILL",
         direction: "DEBIT",
         status: "SETTLED",
+        livemode: true,
         provider: input.provider,
         currency,
         amount: new Prisma.Decimal(amount),
@@ -803,6 +814,7 @@ async function getSpendableTreasuryBalance(currency: string, provider?: GatewayP
     where: {
       currency,
       provider: provider ?? undefined,
+      livemode: true,
       status: { in: ["AVAILABLE", "SETTLED"] }
     },
     _sum: { amount: true }

@@ -12,7 +12,11 @@ type MeteringBalanceRow = {
 };
 type MeteringWriter = Pick<typeof prisma, "app" | "settlement" | "revenuePayout" | "auditLog">;
 
-export async function assertApplicationHasInfrastructureCapacity(appId: string) {
+export async function assertApplicationHasInfrastructureCapacity(appId: string, livemode: boolean = true) {
+  if (!livemode) {
+    return;
+  }
+
   const app = await prisma.app.findUniqueOrThrow({
     where: { id: appId },
     select: {
@@ -42,13 +46,40 @@ export async function consumeOrchestrationMetering(input: {
   processingUnits?: number;
   orchestrationCredits?: number;
   feeAlignedAmount?: number;
+  livemode?: boolean;
   metadata?: Record<string, unknown>;
 }) {
+  const isLive = input.livemode !== false;
   const processingUnits = input.processingUnits ?? DEFAULT_PROCESSING_UNITS;
   const orchestrationCredits =
     input.feeAlignedAmount !== undefined
       ? Math.max(0, input.feeAlignedAmount)
       : (input.orchestrationCredits ?? DEFAULT_ORCHESTRATION_CREDITS);
+
+  if (!isLive) {
+    const app = await prisma.app.findUniqueOrThrow({
+      where: { id: input.appId },
+      select: { infrastructureUsageBalance: true }
+    });
+    const currentBalance = Number(app.infrastructureUsageBalance);
+
+    return prisma.orchestrationMeteringLedger.create({
+      data: {
+        appId: input.appId,
+        transactionId: input.transactionId,
+        eventType: input.eventType,
+        livemode: false,
+        processingUnits: processingUnits.toFixed(2),
+        orchestrationCredits: "0.00",
+        infrastructureUsageBalanceBefore: currentBalance.toFixed(2),
+        infrastructureUsageBalanceAfter: currentBalance.toFixed(2),
+        metadata: {
+          ...(input.metadata ?? {}),
+          sandboxSimulated: true
+        } as Prisma.InputJsonValue
+      }
+    });
+  }
 
   return prisma.$transaction(async (tx) => {
     await maybeAutoRefillCredits(tx, {
@@ -87,6 +118,7 @@ export async function consumeOrchestrationMetering(input: {
         appId: input.appId,
         transactionId: input.transactionId,
         eventType: input.eventType,
+        livemode: true,
         processingUnits: processingUnits.toFixed(2),
         orchestrationCredits: orchestrationCredits.toFixed(2),
         infrastructureUsageBalanceBefore: before.toFixed(2),

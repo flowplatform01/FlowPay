@@ -16,12 +16,14 @@ export async function getRevenuePayoutBalance(input: {
   const transactionWhere: Prisma.TransactionWhereInput = {
     orchestrationMode: "PLATFORM_REVENUE",
     status: "SUCCEEDED",
+    livemode: true,
     currency,
     ...(input.appId ? { appId: input.appId } : {})
   };
   const revenuePayoutWhere: Prisma.RevenuePayoutWhereInput = {
     organizationId: input.organizationId,
     currency,
+    livemode: true,
     status: { in: reservingStatuses },
     ...(input.appId
       ? {
@@ -43,6 +45,7 @@ export async function getRevenuePayoutBalance(input: {
       where: {
         organizationId: input.organizationId,
         status: "SETTLED",
+        livemode: true,
         transaction: transactionWhere
       },
       _sum: {
@@ -166,6 +169,7 @@ export async function createRevenuePayout(input: {
           organizationId: input.organizationId,
           payoutDestinationId: destination.id,
           provider: input.provider,
+          livemode: true,
           amount: input.amount.toFixed(2),
           currency,
           idempotencyKey: input.idempotencyKey,

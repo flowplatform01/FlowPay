@@ -169,7 +169,8 @@ export async function reconcileTransaction(input: {
           externalReference: transaction.externalReference,
           selectedProvider: transaction.selectedProvider,
           appId: transaction.appId,
-          organizationId: transaction.organizationId
+          organizationId: transaction.organizationId,
+          livemode: transaction.livemode
         });
       }
 
@@ -187,6 +188,7 @@ export async function reconcileTransaction(input: {
             transactionId: transaction.id,
             destinationProfileId: transaction.destinationProfileId,
             provider: transaction.selectedProvider,
+            livemode: transaction.livemode,
             status: "PENDING",
             idempotencyKey: `payout:${transaction.id}:${transaction.destinationProfileId ?? "none"}`,
             requestPayload: {

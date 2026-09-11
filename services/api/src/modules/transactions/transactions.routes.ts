@@ -43,9 +43,12 @@ export async function registerTransactionRoutes(app: FastifyInstance) {
     return transaction;
   });
 
-  app.get("/internal/dashboard/summary", { preHandler: [verifyInternalService] }, async () =>
-    getDashboardSummary()
-  );
+  app.get("/internal/dashboard/summary", { preHandler: [verifyInternalService] }, async (request) => {
+    const query = (request.query ?? {}) as { livemode?: string };
+    const livemode =
+      query.livemode === "true" ? true : query.livemode === "false" ? false : undefined;
+    return getDashboardSummary(livemode);
+  });
 
   app.post("/internal/transactions/:id/review", { preHandler: [verifyInternalService] }, async (request, reply) => {
     const { id } = request.params as { id: string };

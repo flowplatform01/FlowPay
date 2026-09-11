@@ -110,7 +110,8 @@ export async function processGatewayWebhook(
           externalReference: transaction.externalReference,
           selectedProvider: transaction.selectedProvider,
           appId: transaction.appId,
-          organizationId: transaction.organizationId
+          organizationId: transaction.organizationId,
+          livemode: transaction.livemode
         });
       }
 
@@ -128,6 +129,7 @@ export async function processGatewayWebhook(
             transactionId: transaction.id,
             destinationProfileId: transaction.destinationProfileId,
             provider,
+            livemode: transaction.livemode,
             status: "PENDING",
             idempotencyKey: `payout:${transaction.id}:${transaction.destinationProfileId ?? "none"}`,
             requestPayload: payload as Prisma.InputJsonValue

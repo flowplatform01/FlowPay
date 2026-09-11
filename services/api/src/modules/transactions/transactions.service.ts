@@ -61,30 +61,17 @@ export async function createTransaction(input: {
 }) {
   const timer = new LatencyTimer();
   const customerPhone = normalizePhoneNumber(input.customerPhone);
-  const [appProfile, existing] = await Promise.all([
+  const appProfile =
     input.appProfile ??
-      prisma.app.findUniqueOrThrow({
-        where: { id: input.appId },
-        include: {
-          organization: true,
-          providerAccesses: true,
-          capabilities: true
-        }
-      }),
-    prisma.transaction.findUnique({
-      where: {
-        appId_idempotencyKey: {
-          appId: input.appId,
-          idempotencyKey: input.idempotencyKey
-        }
-      },
+    (await prisma.app.findUniqueOrThrow({
+      where: { id: input.appId },
       include: {
-        paymentAttempts: true,
-        settlements: true
+        organization: true,
+        providerAccesses: true,
+        capabilities: true
       }
-    })
-  ]);
-  timer.mark("load-app-and-idempotency");
+    }));
+  timer.mark("load-app-profile");
 
   if (appProfile.status !== "ACTIVE") {
     throw new Error("Application is suspended and cannot initiate payments");
@@ -95,20 +82,12 @@ export async function createTransaction(input: {
     throw new Error("Application pay-in capability is disabled");
   }
 
-  if (existing) {
-    return existing;
-  }
-
   const route = await resolveOrchestrationRoute({
     appId: input.appId,
     requestedProvider: input.provider,
     externalRecipientId: input.externalRecipientId
   });
   timer.mark("resolve-route");
-
-  const isCreditPurchase = isCreditPurchaseTransaction(input.metadata);
-  const isRecipientVerification = isRecipientVerificationTransaction(input.metadata);
-  const shouldMeter = !isCreditPurchase && !isRecipientVerification && shouldMeterTransaction(appProfile, route.mode);
 
   const appProviderAccess = appProfile.providerAccesses.find((provider) => provider.provider === route.provider);
   if (appProviderAccess && !appProviderAccess.isEnabled) {
@@ -162,6 +141,30 @@ export async function createTransaction(input: {
 
   const providerRuntimeMode =
     normalizeRuntimeMode(appProviderAccess?.runtimeMode) ?? normalizeRuntimeMode(organizationProviderAccess?.runtimeMode);
+  const livemode = providerRuntimeMode !== "sandbox";
+
+  const existing = await prisma.transaction.findUnique({
+    where: {
+      appId_livemode_idempotencyKey: {
+        appId: input.appId,
+        livemode,
+        idempotencyKey: input.idempotencyKey
+      }
+    },
+    include: {
+      paymentAttempts: true,
+      settlements: true
+    }
+  });
+  timer.mark("load-idempotency");
+
+  if (existing) {
+    return existing;
+  }
+
+  const isCreditPurchase = isCreditPurchaseTransaction(input.metadata);
+  const isRecipientVerification = isRecipientVerificationTransaction(input.metadata);
+  const shouldMeter = !isCreditPurchase && !isRecipientVerification && shouldMeterTransaction(appProfile, route.mode);
 
   assertProviderCanAcceptTraffic(route.provider, gateway);
 
@@ -212,7 +215,8 @@ export async function createTransaction(input: {
           checkoutSessionToken
         }
       : {}),
-    ...(providerRuntimeMode ? { providerRuntimeMode } : {})
+    ...(providerRuntimeMode ? { providerRuntimeMode } : {}),
+    livemode
   };
 
   const transaction = await createTransactionRecord({
@@ -224,6 +228,7 @@ export async function createTransaction(input: {
     settlementStrategy: route.settlementStrategy,
     externalReference: input.externalReference,
     idempotencyKey: input.idempotencyKey,
+    livemode,
     currency: input.currency,
     amount: input.amount.toFixed(2),
     grossAmount: fees.grossAmount.toFixed(2),
@@ -248,6 +253,7 @@ export async function createTransaction(input: {
       transactionId: transaction.id,
       eventType: "PAYMENT_INTENT_INITIALIZED",
       feeAlignedAmount: meteringChargeAmount,
+      livemode,
       metadata: {
         mode: route.mode,
         settlementStrategy: route.settlementStrategy,
@@ -271,6 +277,7 @@ export async function createTransaction(input: {
         transactionId: transaction.id,
         organizationId: input.organizationId,
         payoutDestinationId: route.mode === "PLATFORM_REVENUE" ? destination?.id : undefined,
+        livemode,
         grossAmount: fees.grossAmount.toFixed(2),
         gatewayFeeAmount: fees.gatewayFeeAmount.toFixed(2),
         platformFeeAmount: fees.platformFeeAmount.toFixed(2),
@@ -328,6 +335,7 @@ export async function createTransaction(input: {
       data: {
         transactionId: transaction.id,
         gatewayConfigId: gateway.id,
+        livemode,
         status:
           result.status === "FAILED"
             ? "FAILED"
@@ -393,6 +401,7 @@ export async function createTransaction(input: {
         transactionId: transaction.id,
         organizationId: input.organizationId,
         payoutDestinationId: route.mode === "PLATFORM_REVENUE" ? destination?.id : undefined,
+        livemode,
         grossAmount: fees.grossAmount.toFixed(2),
         gatewayFeeAmount: fees.gatewayFeeAmount.toFixed(2),
         platformFeeAmount: fees.platformFeeAmount.toFixed(2),
@@ -427,7 +436,8 @@ export async function createTransaction(input: {
           externalReference: input.externalReference,
           selectedProvider: route.provider,
           appId: input.appId,
-          organizationId: input.organizationId
+          organizationId: input.organizationId,
+          livemode
         }),
       prismaTransactionOptions
     );
@@ -444,6 +454,7 @@ export async function createTransaction(input: {
         transactionId: transaction.id,
         destinationProfileId: route.destinationProfile?.id,
         provider: route.provider,
+        livemode,
         status: "PENDING",
         idempotencyKey: `payout:${transaction.id}:${route.destinationProfile?.id ?? "none"}`,
         requestPayload: destinationSnapshot as Prisma.InputJsonValue
@@ -723,11 +734,14 @@ export async function listTransactions() {
   });
 }
 
-export async function getDashboardSummary() {
+export async function getDashboardSummary(livemode?: boolean) {
+  const transactionWhere: Prisma.TransactionWhereInput = livemode !== undefined ? { livemode } : {};
+  const settlementWhere: Prisma.SettlementWhereInput = livemode !== undefined ? { livemode } : {};
+
   const [transactions, failedTransactions, pendingSettlements, apps, gatewayHealth] = await Promise.all([
-    prisma.transaction.count(),
-    prisma.transaction.count({ where: { status: "FAILED" } }),
-    prisma.settlement.count({ where: { status: { in: ["PENDING", "PROCESSING"] } } }),
+    prisma.transaction.count({ where: transactionWhere }),
+    prisma.transaction.count({ where: { ...transactionWhere, status: "FAILED" } }),
+    prisma.settlement.count({ where: { ...settlementWhere, status: { in: ["PENDING", "PROCESSING"] } } }),
     prisma.app.count(),
     prisma.gatewayHealth.findMany({ orderBy: { provider: "asc" } })
   ]);
@@ -976,13 +990,15 @@ async function createTransactionRecord(data: Prisma.TransactionCreateInput | Pri
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       const appId = "appId" in data ? data.appId : undefined;
+      const livemode = "livemode" in data ? (data.livemode as boolean) : true;
       const idempotencyKey = "idempotencyKey" in data ? data.idempotencyKey : undefined;
 
       if (typeof appId === "string" && typeof idempotencyKey === "string") {
         return prisma.transaction.findUniqueOrThrow({
           where: {
-            appId_idempotencyKey: {
+            appId_livemode_idempotencyKey: {
               appId,
+              livemode,
               idempotencyKey
             }
           }

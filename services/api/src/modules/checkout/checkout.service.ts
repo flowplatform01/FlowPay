@@ -385,6 +385,7 @@ export async function executeAsynchronousCharge(input: {
             data: {
               transactionId: transaction.id,
               gatewayConfigId: gateway.id,
+              livemode: transaction.livemode,
               status: "PENDING",
               requestPayload: {
                 paymentMethod: input.paymentMethod,
@@ -505,6 +506,7 @@ export async function executeAsynchronousCharge(input: {
             data: {
               transactionId: transaction.id,
               gatewayConfigId: gateway.id,
+              livemode: transaction.livemode,
               status: nextStatus === "FAILED" ? "FAILED" : nextStatus === "SUCCEEDED" ? "SUCCESS" : "PENDING",
               gatewayReference,
               requestPayload: {
@@ -559,7 +561,8 @@ export async function executeAsynchronousCharge(input: {
               externalReference: transaction.externalReference,
               selectedProvider: input.provider,
               appId: transaction.appId,
-              organizationId: transaction.organizationId
+              organizationId: transaction.organizationId,
+              livemode: transaction.livemode
             });
           }
 
@@ -577,6 +580,7 @@ export async function executeAsynchronousCharge(input: {
                 transactionId: transaction.id,
                 destinationProfileId: transaction.destinationProfileId,
                 provider: input.provider,
+                livemode: transaction.livemode,
                 status: "PENDING",
                 idempotencyKey: `payout:${transaction.id}:${transaction.destinationProfileId ?? "none"}`,
                 requestPayload: {

@@ -438,6 +438,7 @@ model Transaction {
   settlementStrategy      SettlementStrategy            @default(TWO_STEP_MIRROR)
   externalReference       String
   idempotencyKey          String
+  livemode                Boolean                       @default(true)
   currency                String
   amount                  Decimal                       @db.Decimal(18, 2)
   grossAmount             Decimal                       @db.Decimal(18, 2)
@@ -469,19 +470,21 @@ model Transaction {
   updatedAt               DateTime                      @updatedAt
   deletedAt               DateTime?
 
-  @@unique([appId, idempotencyKey])
+  @@unique([appId, livemode, idempotencyKey])
   @@index([externalReference, status])
   @@index([organizationId, createdAt])
   @@index([appId, externalRecipientId])
   @@index([destinationProfileId, status])
   @@index([selectedProvider, status])
   @@index([status, createdAt])
+  @@index([livemode, status, createdAt])
 }
 
 model PaymentAttempt {
   id               String               @id @default(cuid())
   transactionId    String
   gatewayConfigId  String
+  livemode         Boolean              @default(true)
   status           PaymentAttemptStatus @default(CREATED)
   requestPayload   Json?
   responsePayload  Json?
@@ -494,6 +497,7 @@ model PaymentAttempt {
 
   @@index([transactionId, status])
   @@index([gatewayReference])
+  @@index([livemode, status])
 }
 
 model TransactionEvent {
@@ -512,6 +516,7 @@ model Settlement {
   transactionId       String
   organizationId      String
   payoutDestinationId String?
+  livemode            Boolean            @default(true)
   status              SettlementStatus   @default(PENDING)
   grossAmount         Decimal            @db.Decimal(18, 2)
   gatewayFeeAmount    Decimal            @db.Decimal(18, 2)
@@ -526,6 +531,7 @@ model Settlement {
 
   @@index([organizationId, status])
   @@index([transactionId, status])
+  @@index([livemode, status, createdAt])
 }
 
 model PayoutCoordination {
@@ -533,6 +539,7 @@ model PayoutCoordination {
   transactionId        String
   destinationProfileId String?
   provider             GatewayProvider
+  livemode             Boolean                  @default(true)
   status               PayoutCoordinationStatus @default(PENDING)
   idempotencyKey       String                   @unique
   attempts             Int                      @default(0)
@@ -547,6 +554,7 @@ model PayoutCoordination {
 
   @@index([transactionId, status])
   @@index([provider, status])
+  @@index([livemode, status])
 }
 
 model TreasuryLedgerEntry {
@@ -555,6 +563,7 @@ model TreasuryLedgerEntry {
   direction           TreasuryLedgerDirection
   status              TreasuryLedgerStatus     @default(AVAILABLE)
   provider            GatewayProvider?
+  livemode            Boolean                  @default(true)
   currency            String
   amount              Decimal                  @db.Decimal(18, 2)
   sourceTransactionId String?
@@ -572,6 +581,7 @@ model TreasuryLedgerEntry {
   @@index([currency, status, createdAt])
   @@index([entryType, createdAt])
   @@index([sourceWithdrawalId])
+  @@index([livemode, currency, status])
 }
 
 model TreasuryWithdrawal {
@@ -606,6 +616,7 @@ model RevenuePayout {
   appId               String?
   payoutDestinationId String?
   provider            GatewayProvider
+  livemode            Boolean             @default(true)
   amount              Decimal             @db.Decimal(18, 2)
   currency            String
   status              RevenuePayoutStatus @default(PENDING)
@@ -626,6 +637,7 @@ model RevenuePayout {
   @@index([appId, status])
   @@index([appId, currency, status])
   @@index([provider, status])
+  @@index([livemode, status])
 }
 
 model OrchestrationMeteringLedger {
@@ -633,6 +645,7 @@ model OrchestrationMeteringLedger {
   appId                            String
   transactionId                    String?
   eventType                        OrchestrationMeterEventType
+  livemode                         Boolean                     @default(true)
   processingUnits                  Decimal                     @db.Decimal(18, 2)
   orchestrationCredits             Decimal                     @db.Decimal(18, 2)
   infrastructureUsageBalanceBefore Decimal                     @db.Decimal(18, 2)
@@ -644,6 +657,7 @@ model OrchestrationMeteringLedger {
 
   @@index([appId, createdAt])
   @@index([transactionId, eventType])
+  @@index([livemode, createdAt])
 }
 
 model WebhookLog {

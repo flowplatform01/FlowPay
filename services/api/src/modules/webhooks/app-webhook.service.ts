@@ -6,12 +6,14 @@ import { decryptSecret, signPayload } from "../../utils/crypto.js";
 type AppWebhookPayload = {
   id: string;
   type: string;
+  livemode: boolean;
   createdAt: string;
   data: {
     transaction: {
       id: string;
       externalReference: string;
       status: TransactionStatus;
+      livemode: boolean;
       amount: number;
       grossAmount: number;
       currency: string;
@@ -56,12 +58,14 @@ export async function dispatchAppWebhook(input: {
   const payload: AppWebhookPayload = {
     id: `evt_${transaction.id}_${input.eventType}_${Date.now()}`,
     type: input.eventType,
+    livemode: transaction.livemode,
     createdAt: new Date().toISOString(),
     data: {
       transaction: {
         id: transaction.id,
         externalReference: transaction.externalReference,
         status: transaction.status,
+        livemode: transaction.livemode,
         amount: Number(transaction.amount),
         grossAmount: Number(transaction.grossAmount),
         currency: transaction.currency,
