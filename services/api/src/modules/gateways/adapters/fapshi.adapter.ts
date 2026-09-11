@@ -7,16 +7,20 @@ import type {
   GatewayChargeResult,
   GatewayPayoutInput,
   GatewayPayoutResult,
+  GatewayStatusOperation,
   GatewayStatusResult
 } from "../gateway.types.js";
 
 type FapshiRuntimeMode = "sandbox" | "live";
+type FapshiOperation = GatewayStatusOperation;
 
 type FapshiRuntime = {
   mode: FapshiRuntimeMode;
   baseUrl: string;
   apiUser: string;
   apiKey: string;
+  payoutApiUser: string;
+  payoutApiKey: string;
   webhookSecret: string;
 };
 
@@ -59,7 +63,9 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
     baseUrl?: string,
     apiUser?: string,
     apiKey?: string,
-    webhookSecret?: string
+    webhookSecret?: string,
+    payoutApiUser?: string,
+    payoutApiKey?: string
   ) {
     if (baseUrl || apiUser || apiKey || webhookSecret) {
       this.staticRuntime = {
@@ -67,6 +73,8 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
         baseUrl: baseUrl ?? "",
         apiUser: apiUser ?? "",
         apiKey: apiKey ?? "",
+        payoutApiUser: payoutApiUser ?? "",
+        payoutApiKey: payoutApiKey ?? "",
         webhookSecret: webhookSecret ?? ""
       };
     }
@@ -99,32 +107,45 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
         message: `FlowPay ${input.externalReference}`.slice(0, 120)
       },
       "POST",
-      input.runtimeMode
+      input.runtimeMode,
+      "collection"
     );
 
     const providerReference = response.body.transId ?? `FAPSHI-${input.transactionId}`;
 
     if (!response.ok) {
+      const providerReportedFailure = mapFapshiStatus(response.body.status) === "FAILED";
+      const transientFailure = isTransientFapshiHttpStatus(response.status) && !providerReportedFailure;
       return {
-        status: "FAILED",
+        status: transientFailure ? "PENDING" : "FAILED",
         providerReference,
-        raw: { ...response.body, httpStatus: response.status }
+        raw: {
+          ...response.body,
+          httpStatus: response.status,
+          providerReferenceConfirmed: Boolean(response.body.transId),
+          transientFailure
+        }
       };
     }
 
     return {
       status: mapFapshiStatus(response.body.status ?? "PENDING"),
       providerReference,
-      raw: response.body
+      raw: { ...response.body, providerReferenceConfirmed: Boolean(response.body.transId) }
     };
   }
 
-  async getTransactionStatus(providerReference: string, runtimeMode?: FapshiRuntimeMode | null): Promise<GatewayStatusResult> {
+  async getTransactionStatus(
+    providerReference: string,
+    runtimeMode?: FapshiRuntimeMode | null,
+    operation: FapshiOperation = "collection"
+  ): Promise<GatewayStatusResult> {
     const response = await this.requestJson<FapshiTransaction>(
       `/payment-status/${encodeURIComponent(providerReference)}`,
       undefined,
       "GET",
-      runtimeMode
+      runtimeMode,
+      operation
     );
     const raw = response.body;
 
@@ -167,7 +188,8 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
         message: `FlowPay payout ${input.transactionId}`.slice(0, 120)
       },
       "POST",
-      input.runtimeMode
+      input.runtimeMode,
+      "payout"
     );
 
     const providerReference = response.body.transId ?? `FAPSHI-PAYOUT-${input.payoutCoordinationId}`;
@@ -188,7 +210,7 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
   }
 
   async getBalance(): Promise<GatewayBalanceResult> {
-    const response = await this.requestJson<FapshiBalanceResponse>("/balance", undefined, "GET");
+    const response = await this.requestJson<FapshiBalanceResponse>("/balance", undefined, "GET", undefined, "collection");
     if (!response.ok) {
       throw new Error(`Fapshi balance request failed (${response.status})`);
     }
@@ -211,9 +233,11 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
     path: string,
     body?: Record<string, unknown>,
     method: "GET" | "POST" = "POST",
-    runtimeMode?: FapshiRuntimeMode | null
+    runtimeMode?: FapshiRuntimeMode | null,
+    operation: FapshiOperation = "collection"
   ): Promise<{ ok: boolean; status: number; body: T & Record<string, unknown> }> {
     const runtime = await this.resolveRuntime(runtimeMode);
+    const credentials = resolveFapshiCredentials(runtime, operation);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), env.GATEWAY_REQUEST_TIMEOUT_MS);
 
@@ -221,8 +245,8 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
       const response = await fetch(`${runtime.baseUrl.replace(/\/$/, "")}${path}`, {
         method,
         headers: {
-          apiuser: runtime.apiUser,
-          apikey: runtime.apiKey,
+          apiuser: credentials.apiUser,
+          apikey: credentials.apiKey,
           "Content-Type": "application/json"
         },
         body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
@@ -308,6 +332,10 @@ function mapFapshiStatus(status: unknown): GatewayChargeResult["status"] {
   return "PENDING";
 }
 
+function isTransientFapshiHttpStatus(status: number) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 function readPositiveNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -338,6 +366,8 @@ async function resolveFapshiRuntime(runtimeMode?: FapshiRuntimeMode | null): Pro
       baseUrl: env.FAPSHI_LIVE_BASE_URL,
       apiUser: env.FAPSHI_LIVE_API_USER,
       apiKey: env.FAPSHI_LIVE_API_KEY,
+      payoutApiUser: env.FAPSHI_LIVE_PAYOUT_API_USER,
+      payoutApiKey: env.FAPSHI_LIVE_PAYOUT_API_KEY,
       webhookSecret: env.FAPSHI_LIVE_WEBHOOK_SECRET
     };
   }
@@ -351,8 +381,21 @@ async function resolveFapshiRuntime(runtimeMode?: FapshiRuntimeMode | null): Pro
     baseUrl: env.FAPSHI_SANDBOX_BASE_URL,
     apiUser: env.FAPSHI_SANDBOX_API_USER,
     apiKey: env.FAPSHI_SANDBOX_API_KEY,
+    payoutApiUser: env.FAPSHI_SANDBOX_PAYOUT_API_USER,
+    payoutApiKey: env.FAPSHI_SANDBOX_PAYOUT_API_KEY,
     webhookSecret: env.FAPSHI_SANDBOX_WEBHOOK_SECRET ?? env.FAPSHI_WEBHOOK_SECRET
   };
+}
+
+function resolveFapshiCredentials(runtime: FapshiRuntime, operation: FapshiOperation) {
+  const apiUser = operation === "payout" ? runtime.payoutApiUser : runtime.apiUser;
+  const apiKey = operation === "payout" ? runtime.payoutApiKey : runtime.apiKey;
+
+  if (!apiUser || !apiKey) {
+    throw new Error(`Fapshi ${runtime.mode} ${operation} credentials are not configured`);
+  }
+
+  return { apiUser, apiKey };
 }
 
 async function readFapshiModeFromProviderConfig(): Promise<FapshiRuntimeMode> {

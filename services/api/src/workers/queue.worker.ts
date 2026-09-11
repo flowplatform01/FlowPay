@@ -255,7 +255,11 @@ async function markProviderlessProcessingTransactionsForReview() {
     where: {
       status: "PROCESSING",
       updatedAt: { lt: cutoff },
-      paymentAttempts: { none: {} }
+      paymentAttempts: {
+        none: {
+          gatewayReference: { not: null }
+        }
+      }
     },
     select: { id: true, status: true },
     orderBy: { updatedAt: "asc" },

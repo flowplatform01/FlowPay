@@ -346,6 +346,10 @@ export async function executeAsynchronousCharge(input: {
     include: { organization: true }
   });
 
+  if (["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED", "UNDER_REVIEW"].includes(transaction.status)) {
+    return transaction;
+  }
+
   const gateway = await prisma.gatewayConfig.findUniqueOrThrow({
     where: { provider: input.provider },
     include: { health: true }
@@ -373,6 +377,63 @@ export async function executeAsynchronousCharge(input: {
     timer.mark("provider-capture");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Gateway capture request failed";
+
+    if (isRetryableGatewayException(error)) {
+      await prisma.$transaction(
+        async (tx) => {
+          await tx.paymentAttempt.create({
+            data: {
+              transactionId: transaction.id,
+              gatewayConfigId: gateway.id,
+              status: "PENDING",
+              requestPayload: {
+                paymentMethod: input.paymentMethod,
+                provider: input.provider,
+                phase: "capture"
+              },
+              responsePayload: {
+                error: message,
+                transientFailure: true,
+                providerReferenceConfirmed: false
+              }
+            }
+          });
+
+          await tx.transaction.update({
+            where: { id: transaction.id },
+            data: {
+              status: "PROCESSING",
+              failureReason: null
+            }
+          });
+
+          await tx.transactionEvent.create({
+            data: {
+              transactionId: transaction.id,
+              eventType: "gateway.capture_uncertain",
+              payload: {
+                provider: input.provider,
+                reason: message,
+                retryable: true
+              } as Prisma.InputJsonValue
+            }
+          });
+
+          await finalizeSettlementsForTransaction(tx, {
+            transactionId: transaction.id,
+            status: "PROCESSING",
+            orchestrationMode: transaction.orchestrationMode,
+            settlementStrategy: transaction.settlementStrategy
+          });
+        },
+        prismaTransactionOptions
+      );
+
+      return prisma.transaction.findUniqueOrThrow({
+        where: { id: transaction.id },
+        include: { organization: true, paymentAttempts: true }
+      });
+    }
 
     await prisma.$transaction(
       async (tx) => {
@@ -420,12 +481,21 @@ export async function executeAsynchronousCharge(input: {
       failureReason: message
     });
 
-    throw new Error(message);
+    return prisma.transaction.findUniqueOrThrow({
+      where: { id: transaction.id },
+      include: { organization: true, paymentAttempts: true }
+    });
   }
 
+  const transientGatewayFailure = result.status === "FAILED" && isTransientGatewayResult(result.raw);
   const nextStatus: TransactionStatus =
-    result.status === "FAILED" ? "FAILED" : result.status === "SUCCESS" ? "SUCCEEDED" : "PROCESSING";
-  const failureReason = result.status === "FAILED" ? extractGatewayFailureReason(result.raw) : null;
+    result.status === "FAILED" && !transientGatewayFailure
+      ? "FAILED"
+      : result.status === "SUCCESS"
+        ? "SUCCEEDED"
+        : "PROCESSING";
+  const failureReason = nextStatus === "FAILED" ? extractGatewayFailureReason(result.raw) : null;
+  const gatewayReference = hasConfirmedProviderReference(result.raw) ? result.providerReference : null;
 
   await withTransientDbRetry(
     () =>
@@ -435,13 +505,8 @@ export async function executeAsynchronousCharge(input: {
             data: {
               transactionId: transaction.id,
               gatewayConfigId: gateway.id,
-              status:
-                result.status === "FAILED"
-                  ? "FAILED"
-                  : result.status === "SUCCESS"
-                    ? "SUCCESS"
-                    : "PENDING",
-              gatewayReference: result.providerReference,
+              status: nextStatus === "FAILED" ? "FAILED" : nextStatus === "SUCCEEDED" ? "SUCCESS" : "PENDING",
+              gatewayReference,
               requestPayload: {
                 paymentMethod: input.paymentMethod,
                 provider: input.provider,
@@ -471,7 +536,7 @@ export async function executeAsynchronousCharge(input: {
                 transactionId: transaction.id,
                 eventType: `transaction.${nextStatus.toLowerCase()}`,
                 payload: {
-                  providerReference: result.providerReference,
+                  providerReference: gatewayReference,
                   paymentMethod: input.paymentMethod
                 } as Prisma.InputJsonValue
               }
@@ -560,7 +625,7 @@ export async function executeAsynchronousCharge(input: {
     );
   }
 
-  if (nextStatus === "PROCESSING" && retryQueue) {
+  if (nextStatus === "PROCESSING" && gatewayReference && retryQueue) {
     const queue = retryQueue;
     await safeQueueAdd("retry-queue", () =>
       queue.add(
@@ -666,6 +731,29 @@ function extractGatewayFailureReason(raw: Record<string, unknown>) {
   }
 
   return candidate.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function isTransientGatewayResult(raw: Record<string, unknown>) {
+  if (raw.transientFailure === true) return true;
+
+  const httpStatus = Number(raw.httpStatus);
+  return httpStatus === 408 || httpStatus === 425 || httpStatus === 429 || httpStatus >= 500;
+}
+
+function hasConfirmedProviderReference(raw: Record<string, unknown>) {
+  if (raw.providerReferenceConfirmed === false) return false;
+  if (raw.providerReferenceConfirmed === true) return true;
+
+  return [raw.reference, raw.transId, raw.transactionId, raw.transaction_id].some(
+    (value) => typeof value === "string" && value.length > 0
+  );
+}
+
+function isRetryableGatewayException(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|timeout|timed out|fetch failed|network|socket|econnreset|econnrefused|eai_again|enotfound|503|502|504|429/i.test(
+    message
+  );
 }
 
 function readString(value: unknown) {

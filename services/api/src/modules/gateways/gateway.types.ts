@@ -26,6 +26,8 @@ export type GatewayStatusResult = GatewayChargeResult & {
   currency?: string;
 };
 
+export type GatewayStatusOperation = "collection" | "payout";
+
 export type GatewayPayoutInput = {
   transactionId: string;
   payoutCoordinationId: string;
@@ -54,7 +56,11 @@ export type GatewayBalanceResult = {
 export interface GatewayAdapter {
   provider: GatewayProvider;
   charge(input: GatewayChargeInput): Promise<GatewayChargeResult>;
-  getTransactionStatus?(providerReference: string, runtimeMode?: "sandbox" | "live" | null): Promise<GatewayStatusResult>;
+  getTransactionStatus?(
+    providerReference: string,
+    runtimeMode?: "sandbox" | "live" | null,
+    operation?: GatewayStatusOperation
+  ): Promise<GatewayStatusResult>;
   executePayout?(input: GatewayPayoutInput): Promise<GatewayPayoutResult>;
   getBalance?(): Promise<GatewayBalanceResult>;
   verifyWebhookSignature(payload: string, signature?: string): boolean;

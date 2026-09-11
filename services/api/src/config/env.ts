@@ -46,6 +46,8 @@ const envSchema = z.object({
   FAPSHI_LIVE_APIUSER: z.string().optional(),
   FAPSHI_LIVE_API_KEY: z.string().optional(),
   FAPSHI_LIVE_APIKEY: z.string().optional(),
+  FAPSHI_LIVE_PAYOUT_API_USER: z.string().optional(),
+  FAPSHI_LIVE_PAYOUT_API_KEY: z.string().optional(),
   FAPSHI_LIVE_WEBHOOK_SECRET: z.string().optional(),
   FAPSHI_API_KEY_USER: z.string().optional(),
   FAPSHI_API_USER: z.string().optional(),
@@ -58,6 +60,8 @@ const envSchema = z.object({
   FAPSHI_SANDBOX_APIUSER: z.string().optional(),
   FAPSHI_SANDBOX_API_KEY: z.string().optional(),
   FAPSHI_SANDBOX_APIKEY: z.string().optional(),
+  FAPSHI_SANDBOX_PAYOUT_API_USER: z.string().optional(),
+  FAPSHI_SANDBOX_PAYOUT_API_KEY: z.string().optional(),
   FAPSHI_SANDBOX_WEBHOOK_SECRET: z.string().optional(),
   MAVIANCE_BASE_URL: z.string().default("https://api.maviance.com"),
   MAVIANCE_PUBLIC_KEY: z.string().optional(),
@@ -93,10 +97,14 @@ const fapshiLiveApiUser =
   "";
 const fapshiLiveApiKey =
   parsed.FAPSHI_LIVE_API_KEY ?? parsed.FAPSHI_LIVE_APIKEY ?? parsed.FAPSHI_API_KEY ?? parsed.FAPSHI_APIKEY ?? "";
+const fapshiLivePayoutApiUser = parsed.FAPSHI_LIVE_PAYOUT_API_USER ?? "";
+const fapshiLivePayoutApiKey = parsed.FAPSHI_LIVE_PAYOUT_API_KEY ?? "";
 const fapshiLiveWebhookSecret = parsed.FAPSHI_LIVE_WEBHOOK_SECRET ?? parsed.FAPSHI_WEBHOOK_SECRET;
 const fapshiSandboxApiUser =
   parsed.FAPSHI_SANDBOX_API_USER ?? parsed.FAPSHI_SANDBOX_APIUSER ?? parsed.FAPSHI_SANDBOX_API_KEY_USER ?? "";
 const fapshiSandboxApiKey = parsed.FAPSHI_SANDBOX_API_KEY ?? parsed.FAPSHI_SANDBOX_APIKEY ?? "";
+const fapshiSandboxPayoutApiUser = parsed.FAPSHI_SANDBOX_PAYOUT_API_USER ?? "";
+const fapshiSandboxPayoutApiKey = parsed.FAPSHI_SANDBOX_PAYOUT_API_KEY ?? "";
 const fapshiRuntimeMode = parsed.NODE_ENV === "production" ? "live" : "sandbox";
 const fapshiRuntimeBaseUrl =
   fapshiRuntimeMode === "live" ? fapshiLiveBaseUrl : parsed.FAPSHI_SANDBOX_BASE_URL;
@@ -127,13 +135,19 @@ export const env = {
   FAPSHI_LIVE_BASE_URL: fapshiLiveBaseUrl,
   FAPSHI_LIVE_API_USER: fapshiLiveApiUser,
   FAPSHI_LIVE_API_KEY: fapshiLiveApiKey,
+  FAPSHI_LIVE_PAYOUT_API_USER: fapshiLivePayoutApiUser,
+  FAPSHI_LIVE_PAYOUT_API_KEY: fapshiLivePayoutApiKey,
   FAPSHI_LIVE_WEBHOOK_SECRET: fapshiLiveWebhookSecret ?? parsed.WEBHOOK_SIGNING_SECRET ?? parsed.JWT_SECRET,
   FAPSHI_API_USER: fapshiLiveApiUser,
   FAPSHI_API_KEY: fapshiLiveApiKey,
   FAPSHI_SANDBOX_API_USER: fapshiSandboxApiUser,
   FAPSHI_SANDBOX_API_KEY: fapshiSandboxApiKey,
+  FAPSHI_SANDBOX_PAYOUT_API_USER: fapshiSandboxPayoutApiUser,
+  FAPSHI_SANDBOX_PAYOUT_API_KEY: fapshiSandboxPayoutApiKey,
   FAPSHI_HAS_LIVE_CREDENTIALS: Boolean(fapshiLiveApiUser && fapshiLiveApiKey),
   FAPSHI_HAS_SANDBOX_CREDENTIALS: Boolean(fapshiSandboxApiUser && fapshiSandboxApiKey),
+  FAPSHI_HAS_LIVE_PAYOUT_CREDENTIALS: Boolean(fapshiLivePayoutApiUser && fapshiLivePayoutApiKey),
+  FAPSHI_HAS_SANDBOX_PAYOUT_CREDENTIALS: Boolean(fapshiSandboxPayoutApiUser && fapshiSandboxPayoutApiKey),
   FAPSHI_RUNTIME_MODE: fapshiRuntimeMode,
   FAPSHI_RUNTIME_BASE_URL: fapshiRuntimeBaseUrl,
   FAPSHI_RUNTIME_API_USER: fapshiRuntimeApiUser,

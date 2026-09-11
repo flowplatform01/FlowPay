@@ -436,7 +436,7 @@ export async function processRevenuePayout(id: string) {
     const providerRuntimeMode = readProviderRuntimeMode(payout.metadata);
     const result =
       existingProviderReference && adapter.getTransactionStatus
-        ? await adapter.getTransactionStatus(existingProviderReference, providerRuntimeMode)
+        ? await adapter.getTransactionStatus(existingProviderReference, providerRuntimeMode, "payout")
         : await adapter.executePayout({
             transactionId: `revenue:${payout.id}`,
             payoutCoordinationId: payout.id,

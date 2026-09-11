@@ -2,7 +2,7 @@ import type { GatewayProvider, Prisma, TransactionStatus } from "@prisma/client"
 import { prisma, prismaTransactionOptions } from "../../config/db.js";
 import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 import { getGatewayAdapter } from "../gateways/gateways.service.js";
-import type { GatewayStatusResult } from "../gateways/gateway.types.js";
+import type { GatewayStatusOperation, GatewayStatusResult } from "../gateways/gateway.types.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
 import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
 
@@ -77,7 +77,8 @@ export async function reconcileTransaction(input: {
     return { reconciled: true, status: "UNDER_REVIEW" };
   }
 
-  const inferredStatus = providerInferredStatus ?? inferStatusFromAttempt(latestAttempt);
+  const inferredStatus =
+    providerInferredStatus ?? inferStatusFromAttempt(latestAttempt, providerStatus.result, providerStatus.error);
 
   if (!inferredStatus) {
     const retryable =
@@ -262,7 +263,8 @@ export async function reconcileTransaction(input: {
 async function fetchProviderStatus(
   provider: GatewayProvider,
   providerReference?: string | null,
-  runtimeMode?: "sandbox" | "live" | null
+  runtimeMode?: "sandbox" | "live" | null,
+  operation: GatewayStatusOperation = "collection"
 ) {
   if (!providerReference) {
     return { result: null, error: null };
@@ -274,7 +276,7 @@ async function fetchProviderStatus(
   }
 
   try {
-    const result = await adapter.getTransactionStatus(providerReference, runtimeMode);
+    const result = await adapter.getTransactionStatus(providerReference, runtimeMode, operation);
     return { result, error: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Provider status lookup failed";
@@ -350,25 +352,45 @@ function inferStatusFromAttempt(
         status: string;
         responsePayload: unknown;
       }
-    | undefined
+    | undefined,
+  providerStatus?: GatewayStatusResult | null,
+  providerStatusError?: string | null
 ): TransactionStatus | null {
   if (!attempt) return null;
 
   if (attempt.status === "SUCCESS") return "SUCCEEDED";
-  if (attempt.status === "FAILED") return "FAILED";
 
   const rawStatus = readRawStatus(attempt.responsePayload);
-  if (!rawStatus) return null;
-
-  if (rawStatus.includes("SUCCESS") || rawStatus.includes("COMPLETED") || rawStatus.includes("PAID")) {
+  if (rawStatus && (rawStatus.includes("SUCCESS") || rawStatus.includes("COMPLETED") || rawStatus.includes("PAID"))) {
     return "SUCCEEDED";
   }
 
-  if (rawStatus.includes("FAIL") || rawStatus.includes("CANCEL") || rawStatus.includes("REJECT")) {
+  if (rawStatus && (rawStatus.includes("FAIL") || rawStatus.includes("CANCEL") || rawStatus.includes("REJECT"))) {
     return "FAILED";
   }
 
-  return null;
+  if (attempt.status !== "FAILED") return null;
+
+  if (isTransientGatewayResponse(attempt.responsePayload)) {
+    return null;
+  }
+
+  if (providerStatus?.status === "PENDING" || providerStatusError) {
+    return null;
+  }
+
+  return "FAILED";
+
+}
+
+function isTransientGatewayResponse(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+
+  const record = payload as Record<string, unknown>;
+  if (record.transientFailure === true) return true;
+
+  const httpStatus = Number(record.httpStatus);
+  return httpStatus === 408 || httpStatus === 425 || httpStatus === 429 || httpStatus >= 500;
 }
 
 function readRawStatus(payload: unknown) {

@@ -34,7 +34,14 @@ async function withMockFetch<T>(responses: MockResponse[], test: () => Promise<T
 }
 
 async function run() {
-  const adapter = new FapshiGatewayAdapter("https://fapshi.test", "api-user", "api-key", "webhook-secret");
+  const adapter = new FapshiGatewayAdapter(
+    "https://fapshi.test",
+    "collection-user",
+    "collection-key",
+    "webhook-secret",
+    "payout-user",
+    "payout-key"
+  );
 
   assert.equal(adapter.verifyWebhookSignature("{}", "webhook-secret"), true);
   assert.equal(adapter.verifyWebhookSignature("{}", "wrong-secret"), false);
@@ -66,6 +73,22 @@ async function run() {
   assert.equal(charge.result.status, "PENDING");
   assert.equal(charge.result.providerReference, "FP-123");
   assert.equal(charge.calls[0]?.url, "https://fapshi.test/direct-pay");
+  assert.equal((charge.calls[0]?.options?.headers as Record<string, string>).apiuser, "collection-user");
+
+  const transientCharge = await withMockFetch(
+    [{ ok: false, status: 503, body: { message: "Service temporarily unavailable" } }],
+    () =>
+      adapter.charge({
+        transactionId: "tx-provider-unavailable",
+        amount: 100,
+        currency: "XAF",
+        customerPhone: "+237677777777",
+        externalReference: "order-provider-unavailable"
+      })
+  );
+  assert.equal(transientCharge.result.status, "PENDING");
+  assert.equal(transientCharge.result.raw.transientFailure, true);
+  assert.equal(transientCharge.result.raw.providerReferenceConfirmed, false);
 
   const status = await withMockFetch(
     [{ ok: true, status: 200, body: { transId: "FP-123", status: "SUCCESSFUL", amount: 100 } }],
@@ -74,6 +97,7 @@ async function run() {
   assert.equal(status.result.status, "SUCCESS");
   assert.equal(status.result.amount, 100);
   assert.equal(status.calls[0]?.url, "https://fapshi.test/payment-status/FP-123");
+  assert.equal((status.calls[0]?.options?.headers as Record<string, string>).apiuser, "collection-user");
 
   const payout = await withMockFetch(
     [{ ok: true, status: 200, body: { transId: "PO-123", status: "PENDING" } }],
@@ -90,6 +114,34 @@ async function run() {
   assert.equal(payout.result.status, "PENDING");
   assert.equal(payout.result.providerReference, "PO-123");
   assert.equal(payout.calls[0]?.url, "https://fapshi.test/payout");
+  assert.equal((payout.calls[0]?.options?.headers as Record<string, string>).apiuser, "payout-user");
+
+  const payoutStatus = await withMockFetch(
+    [{ ok: true, status: 200, body: { transId: "PO-123", status: "SUCCESSFUL", amount: 100 } }],
+    () => adapter.getTransactionStatus("PO-123", "sandbox", "payout")
+  );
+  assert.equal(payoutStatus.result.status, "SUCCESS");
+  assert.equal(payoutStatus.calls[0]?.url, "https://fapshi.test/payment-status/PO-123");
+  assert.equal((payoutStatus.calls[0]?.options?.headers as Record<string, string>).apiuser, "payout-user");
+
+  const collectionOnlyAdapter = new FapshiGatewayAdapter(
+    "https://fapshi.test",
+    "collection-user",
+    "collection-key",
+    "webhook-secret"
+  );
+  await assert.rejects(
+    () =>
+      collectionOnlyAdapter.executePayout({
+        transactionId: "tx-missing-payout-credentials",
+        payoutCoordinationId: "pc-missing-payout-credentials",
+        payoutTarget: "+237677777778",
+        amount: 100,
+        currency: "XAF",
+        idempotencyKey: "payout-missing-payout-credentials"
+      }),
+    /sandbox payout credentials are not configured/
+  );
 }
 
 run()
