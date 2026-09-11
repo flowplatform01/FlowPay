@@ -189,7 +189,8 @@ export async function processGatewayWebhook(
       status: mappedStatus,
       metadata: transaction.metadata,
       settlementAmount: transaction.settlementAmount,
-      failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null
+      failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null,
+      livemode: transaction.livemode
     });
 
     const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");

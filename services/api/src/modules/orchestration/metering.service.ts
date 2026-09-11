@@ -12,23 +12,19 @@ type MeteringBalanceRow = {
 };
 type MeteringWriter = Pick<typeof prisma, "app" | "settlement" | "revenuePayout" | "auditLog">;
 
-export async function assertApplicationHasInfrastructureCapacity(appId: string, livemode: boolean = true) {
-  if (!livemode) {
-    return;
-  }
-
+export async function assertApplicationHasInfrastructureCapacity(appId: string) {
   const app = await prisma.app.findUniqueOrThrow({
     where: { id: appId },
     select: {
-        infrastructureUsageBalance: true,
-        autoCreditRefillEnabled: true,
-        autoCreditRefillThreshold: true,
-        autoCreditRefillAmount: true,
-        autoCreditRefillProvider: true,
-        processingUnits: true,
-        orchestrationCredits: true
-      }
-    });
+      infrastructureUsageBalance: true,
+      autoCreditRefillEnabled: true,
+      autoCreditRefillThreshold: true,
+      autoCreditRefillAmount: true,
+      autoCreditRefillProvider: true,
+      processingUnits: true,
+      orchestrationCredits: true
+    }
+  });
 
   if (
     Number(app.infrastructureUsageBalance) <= 0 ||
@@ -55,31 +51,6 @@ export async function consumeOrchestrationMetering(input: {
     input.feeAlignedAmount !== undefined
       ? Math.max(0, input.feeAlignedAmount)
       : (input.orchestrationCredits ?? DEFAULT_ORCHESTRATION_CREDITS);
-
-  if (!isLive) {
-    const app = await prisma.app.findUniqueOrThrow({
-      where: { id: input.appId },
-      select: { infrastructureUsageBalance: true }
-    });
-    const currentBalance = Number(app.infrastructureUsageBalance);
-
-    return prisma.orchestrationMeteringLedger.create({
-      data: {
-        appId: input.appId,
-        transactionId: input.transactionId,
-        eventType: input.eventType,
-        livemode: false,
-        processingUnits: processingUnits.toFixed(2),
-        orchestrationCredits: "0.00",
-        infrastructureUsageBalanceBefore: currentBalance.toFixed(2),
-        infrastructureUsageBalanceAfter: currentBalance.toFixed(2),
-        metadata: {
-          ...(input.metadata ?? {}),
-          sandboxSimulated: true
-        } as Prisma.InputJsonValue
-      }
-    });
-  }
 
   return prisma.$transaction(async (tx) => {
     await maybeAutoRefillCredits(tx, {
@@ -118,7 +89,7 @@ export async function consumeOrchestrationMetering(input: {
         appId: input.appId,
         transactionId: input.transactionId,
         eventType: input.eventType,
-        livemode: true,
+        livemode: isLive,
         processingUnits: processingUnits.toFixed(2),
         orchestrationCredits: orchestrationCredits.toFixed(2),
         infrastructureUsageBalanceBefore: before.toFixed(2),

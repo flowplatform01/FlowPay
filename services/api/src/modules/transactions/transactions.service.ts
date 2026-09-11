@@ -163,6 +163,9 @@ export async function createTransaction(input: {
   }
 
   const isCreditPurchase = isCreditPurchaseTransaction(input.metadata);
+  if (isCreditPurchase && !livemode) {
+    throw new Error("Credit purchases cannot be initiated in sandbox mode. Credit purchases require live payment processing.");
+  }
   const isRecipientVerification = isRecipientVerificationTransaction(input.metadata);
   const shouldMeter = !isCreditPurchase && !isRecipientVerification && shouldMeterTransaction(appProfile, route.mode);
 
@@ -469,7 +472,8 @@ export async function createTransaction(input: {
       status: nextStatus,
       metadata: transactionMetadata,
       settlementAmount: settlement.settlementAmount,
-      failureReason: nextStatus === "FAILED" ? "Gateway returned failure status" : null
+      failureReason: nextStatus === "FAILED" ? "Gateway returned failure status" : null,
+      livemode: transaction.livemode
     });
   }
 

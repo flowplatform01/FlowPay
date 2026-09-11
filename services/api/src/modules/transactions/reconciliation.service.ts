@@ -247,7 +247,8 @@ export async function reconcileTransaction(input: {
     status: inferredStatus,
     metadata: transaction.metadata,
     settlementAmount: transaction.settlementAmount,
-    failureReason: transaction.failureReason
+    failureReason: transaction.failureReason,
+    livemode: transaction.livemode
   });
 
   const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");

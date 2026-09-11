@@ -470,7 +470,8 @@ export async function executeAsynchronousCharge(input: {
       status: "FAILED",
       metadata: transaction.metadata,
       settlementAmount: transaction.settlementAmount,
-      failureReason: message
+      failureReason: message,
+      livemode: transaction.livemode
     });
 
     const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
@@ -652,7 +653,8 @@ export async function executeAsynchronousCharge(input: {
       status: nextStatus,
       metadata: transaction.metadata,
       settlementAmount: transaction.settlementAmount,
-      failureReason
+      failureReason,
+      livemode: transaction.livemode
     });
 
     const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");

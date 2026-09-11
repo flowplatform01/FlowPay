@@ -253,7 +253,8 @@ export async function completeCreditPurchase(input: {
         appId: true,
         externalReference: true,
         amount: true,
-        status: true
+        status: true,
+        livemode: true
       }
     })
   ]);
@@ -271,6 +272,10 @@ export async function completeCreditPurchase(input: {
 
   if (transaction.status !== "SUCCEEDED") {
     throw new Error("Credit purchase transaction has not succeeded");
+  }
+
+  if (!transaction.livemode) {
+    throw new Error("Cannot fulfill credit purchase using a sandbox transaction. Real infrastructure credits require live payment.");
   }
 
   if (transaction.appId !== purchase.appId) {
@@ -364,12 +369,25 @@ export async function maybeFinalizeCreditPurchaseFromTransaction(transaction: {
   metadata: unknown;
   settlementAmount: Prisma.Decimal | number | string;
   failureReason?: string | null;
+  livemode?: boolean;
 }) {
   if (!isCreditPurchaseMetadata(transaction.metadata)) {
     return;
   }
 
   const purchaseIntentId = transaction.metadata.purchaseIntentId;
+
+  if (transaction.livemode === false) {
+    try {
+      await failCreditPurchase(
+        purchaseIntentId,
+        "Cannot fulfill credit purchase using a sandbox transaction. Real infrastructure credits require live payment settlement."
+      );
+    } catch (err) {
+      console.error("Failed to mark sandbox credit purchase failed", purchaseIntentId, err);
+    }
+    return;
+  }
 
   if (transaction.status === "SUCCEEDED") {
     try {
