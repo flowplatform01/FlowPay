@@ -7,8 +7,10 @@ import {
   expireStalePendingCheckoutTransactions,
   getDashboardSummary,
   getTransactionById,
+  globalSearch,
   listTransactions,
-  markTransactionUnderReview
+  markTransactionUnderReview,
+  queryTransactions
 } from "./transactions.service.js";
 import { verifyAppSecretKey } from "../auth/app-auth.guard.js";
 import { verifyInternalService } from "../auth/internal-auth.guard.js";
@@ -28,9 +30,45 @@ import { reconcileTransaction } from "./reconciliation.service.js";
 import { FeeRangeMatchError } from "../fees/fee-rule.resolver.js";
 
 export async function registerTransactionRoutes(app: FastifyInstance) {
-  app.get("/internal/transactions", { preHandler: [verifyInternalService] }, async () =>
-    listTransactions()
-  );
+  app.get("/internal/transactions", { preHandler: [verifyInternalService] }, async (request) => {
+    const query = (request.query ?? {}) as Record<string, string>;
+    if (Object.keys(query).length > 0) {
+      return queryTransactions({
+        search: query.search,
+        status: query.status,
+        livemode: query.livemode === "true" ? true : query.livemode === "false" ? false : undefined,
+        organizationId: query.organizationId,
+        appId: query.appId,
+        provider: query.provider,
+        startDate: query.startDate,
+        endDate: query.endDate,
+        page: query.page ? Number(query.page) : undefined,
+        limit: query.limit ? Number(query.limit) : undefined
+      });
+    }
+    return listTransactions();
+  });
+
+  app.get("/internal/transactions/search", { preHandler: [verifyInternalService] }, async (request) => {
+    const query = (request.query ?? {}) as Record<string, string>;
+    return queryTransactions({
+      search: query.search,
+      status: query.status,
+      livemode: query.livemode === "true" ? true : query.livemode === "false" ? false : undefined,
+      organizationId: query.organizationId,
+      appId: query.appId,
+      provider: query.provider,
+      startDate: query.startDate,
+      endDate: query.endDate,
+      page: query.page ? Number(query.page) : undefined,
+      limit: query.limit ? Number(query.limit) : undefined
+    });
+  });
+
+  app.get("/internal/search", { preHandler: [verifyInternalService] }, async (request) => {
+    const query = (request.query ?? {}) as { q?: string };
+    return globalSearch(query.q ?? "");
+  });
 
   app.get("/internal/transactions/:id", { preHandler: [verifyInternalService] }, async (request, reply) => {
     const { id } = request.params as { id: string };

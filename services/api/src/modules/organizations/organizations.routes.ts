@@ -8,6 +8,7 @@ import {
   upsertPayoutDestinationSchema
 } from "./organizations.schema.js";
 import {
+  activateFeeRule,
   createFeeRule,
   createOrganization,
   listOrganizations,
@@ -75,5 +76,10 @@ export async function registerOrganizationRoutes(app: FastifyInstance) {
 
     const { id } = request.params as { id: string };
     return reply.send(await updateFeeRule(id, parsed.data));
+  });
+
+  app.post("/internal/fee-rules/:id/activate", { preHandler: [verifyInternalService] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    return reply.send(await activateFeeRule(id));
   });
 }

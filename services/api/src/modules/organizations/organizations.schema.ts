@@ -35,6 +35,8 @@ export const createFeeRuleSchema = z.object({
   flatAmount: z.number().nonnegative().optional(),
   percentageRate: z.number().nonnegative().optional(),
   dynamicConfig: z.record(z.any()).optional(),
+  advancedBillingEnabled: z.boolean().optional(),
+  rangeFallbackStrategy: z.enum(["USE_STANDARD_RULE", "REJECT", "ZERO_FEE"]).optional(),
   isActive: z.boolean().optional()
 });
 

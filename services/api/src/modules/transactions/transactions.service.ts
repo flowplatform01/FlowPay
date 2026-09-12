@@ -29,10 +29,13 @@ import {
 import { isCreditPurchaseTransaction } from "../credits/credits.service.js";
 import { assertProviderCanAcceptTraffic } from "../providers/provider-registry.js";
 import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
+import { getActiveFeeRuleForOrganization } from "../fees/fee-rules.service.js";
+import {
+  getCachedRoutingDependency,
+  ROUTING_CACHE_TTL_MS,
+  SHORT_ROUTING_CACHE_TTL_MS
+} from "./routing-cache.js";
 
-const SHORT_ROUTING_CACHE_TTL_MS = 5_000;
-const ROUTING_CACHE_TTL_MS = 30_000;
-const routingDependencyCache = new Map<string, { expiresAt: number; value: unknown }>();
 type AuthenticatedAppProfile = Prisma.AppGetPayload<{
   include: {
     organization: true;
@@ -114,15 +117,7 @@ export async function createTransaction(input: {
       })
     ),
     getCachedRoutingDependency(`fee-rule:${input.organizationId}`, ROUTING_CACHE_TTL_MS, () =>
-      prisma.feeRule.findFirst({
-        where: { organizationId: input.organizationId, isActive: true },
-        include: {
-          ranges: {
-            orderBy: { sortOrder: "asc" }
-          }
-        },
-        orderBy: { createdAt: "desc" }
-      })
+      getActiveFeeRuleForOrganization(input.organizationId)
     ),
     getCachedRoutingDependency(`default-payout-destination:${input.organizationId}`, ROUTING_CACHE_TTL_MS, () =>
       prisma.payoutDestination.findFirst({
@@ -637,23 +632,6 @@ function asRecord(value: unknown) {
   return {};
 }
 
-async function getCachedRoutingDependency<T>(key: string, ttlMs: number, loader: () => Promise<T>) {
-  const now = Date.now();
-  const cached = routingDependencyCache.get(key);
-
-  if (cached && cached.expiresAt > now) {
-    return cached.value as T;
-  }
-
-  const value = await loader();
-  routingDependencyCache.set(key, {
-    value,
-    expiresAt: now + ttlMs
-  });
-
-  return value;
-}
-
 function shouldMeterTransaction(
   app: { mode1MeteringEnabled: boolean; mode2MeteringEnabled: boolean },
   mode: OrchestrationMode
@@ -727,15 +705,150 @@ export async function getTransactionById(id: string) {
   });
 }
 
-export async function listTransactions() {
-  return prisma.transaction.findMany({
-    include: {
-      app: true,
-      organization: true
-    },
-    orderBy: { createdAt: "desc" },
-    take: 100
-  });
+export type ListTransactionsFilter = {
+  search?: string;
+  status?: string;
+  livemode?: boolean;
+  organizationId?: string;
+  appId?: string;
+  provider?: string;
+  startDate?: string | Date;
+  endDate?: string | Date;
+  page?: number;
+  limit?: number;
+};
+
+export async function listTransactions(filters?: ListTransactionsFilter) {
+  if (!filters || Object.keys(filters).length === 0) {
+    return prisma.transaction.findMany({
+      include: {
+        app: true,
+        organization: true
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100
+    });
+  }
+
+  return queryTransactions(filters);
+}
+
+export async function queryTransactions(filters: ListTransactionsFilter = {}) {
+  const where: Prisma.TransactionWhereInput = {};
+
+  if (filters.livemode !== undefined) {
+    where.livemode = filters.livemode;
+  }
+
+  if (filters.status && filters.status !== "ALL") {
+    where.status = filters.status as any;
+  }
+
+  if (filters.organizationId) {
+    where.organizationId = filters.organizationId;
+  }
+
+  if (filters.appId) {
+    where.appId = filters.appId;
+  }
+
+  if (filters.provider && filters.provider !== "ALL") {
+    where.selectedProvider = filters.provider as any;
+  }
+
+  if (filters.startDate || filters.endDate) {
+    where.createdAt = {};
+    if (filters.startDate) {
+      where.createdAt.gte = new Date(filters.startDate);
+    }
+    if (filters.endDate) {
+      where.createdAt.lte = new Date(filters.endDate);
+    }
+  }
+
+  if (filters.search && filters.search.trim()) {
+    const q = filters.search.trim();
+    where.OR = [
+      { id: { equals: q } },
+      { externalReference: { contains: q, mode: "insensitive" } },
+      { customerPhone: { contains: q } },
+      { app: { name: { contains: q, mode: "insensitive" } } },
+      { organization: { name: { contains: q, mode: "insensitive" } } }
+    ];
+  }
+
+  const page = Math.max(1, filters.page ?? 1);
+  const limit = Math.min(200, Math.max(1, filters.limit ?? 50));
+  const skip = (page - 1) * limit;
+
+  const [items, total] = await Promise.all([
+    prisma.transaction.findMany({
+      where,
+      include: {
+        app: true,
+        organization: true
+      },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit
+    }),
+    prisma.transaction.count({ where })
+  ]);
+
+  return {
+    items,
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+    hasMore: skip + items.length < total
+  };
+}
+
+export async function globalSearch(query: string) {
+  const q = query.trim();
+  if (!q) {
+    return { transactions: [], organizations: [], apps: [] };
+  }
+
+  const [transactions, organizations, apps] = await Promise.all([
+    prisma.transaction.findMany({
+      where: {
+        OR: [
+          { id: { equals: q } },
+          { externalReference: { contains: q, mode: "insensitive" } },
+          { customerPhone: { contains: q } }
+        ]
+      },
+      include: { app: true, organization: true },
+      orderBy: { createdAt: "desc" },
+      take: 20
+    }),
+    prisma.organization.findMany({
+      where: {
+        OR: [
+          { id: { equals: q } },
+          { name: { contains: q, mode: "insensitive" } },
+          { slug: { contains: q, mode: "insensitive" } }
+        ]
+      },
+      take: 10
+    }),
+    prisma.app.findMany({
+      where: {
+        OR: [
+          { id: { equals: q } },
+          { name: { contains: q, mode: "insensitive" } },
+          { slug: { contains: q, mode: "insensitive" } },
+          { clientId: { equals: q } }
+        ]
+      },
+      include: { organization: true },
+      take: 10
+    })
+  ]);
+
+  return { transactions, organizations, apps };
 }
 
 export async function getDashboardSummary(livemode?: boolean) {

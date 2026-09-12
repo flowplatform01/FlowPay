@@ -96,9 +96,23 @@ export async function registerMonitoringRoutes(app: FastifyInstance) {
     })
   );
 
-  app.get("/internal/monitoring/audit-logs", { preHandler: [verifyInternalService] }, async () =>
-    listAuditLogs()
-  );
+  app.get("/internal/monitoring/audit-logs", { preHandler: [verifyInternalService] }, async (request) => {
+    const query = (request.query ?? {}) as Record<string, string>;
+    if (Object.keys(query).length > 0) {
+      return listAuditLogs({
+        action: query.action,
+        actorType: query.actorType,
+        entityType: query.entityType,
+        entityId: query.entityId,
+        startDate: query.startDate,
+        endDate: query.endDate,
+        search: query.search,
+        page: query.page ? Number(query.page) : undefined,
+        limit: query.limit ? Number(query.limit) : undefined
+      });
+    }
+    return listAuditLogs();
+  });
 }
 
 async function getQueueCountsSafely(queue: NonNullable<typeof retryQueue>) {

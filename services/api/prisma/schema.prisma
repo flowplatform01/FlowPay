@@ -347,7 +347,7 @@ model GatewayHealth {
 
 model FeeRule {
   id                     String                   @id @default(cuid())
-  organizationId         String
+  organizationId         String?
   name                   String
   type                   FeeRuleType
   flatAmount             Decimal?                 @db.Decimal(18, 2)
@@ -356,10 +356,12 @@ model FeeRule {
   advancedBillingEnabled Boolean                  @default(false)
   rangeFallbackStrategy  FeeRangeFallbackStrategy @default(USE_STANDARD_RULE)
   isActive               Boolean                  @default(true)
-  organization           Organization             @relation(fields: [organizationId], references: [id])
+  organization           Organization?            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   ranges                 FeeRuleRange[]
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt
+
+  @@index([organizationId, isActive])
 }
 
 model FeeRuleRange {

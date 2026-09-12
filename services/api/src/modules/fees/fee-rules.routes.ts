@@ -5,9 +5,11 @@ import { verifyInternalService } from "../auth/internal-auth.guard.js";
 import {
   FeeRangeMatchError,
   FeeRuleRangeValidationError,
+  getActiveGlobalFeeRule,
   previewFeeCalculation,
   replaceFeeRuleRanges,
-  updateFeeRuleAdvancedBilling
+  updateFeeRuleAdvancedBilling,
+  updateOrCreateGlobalFeeRule
 } from "./fee-rules.service.js";
 
 const rangeSchema = z.object({
@@ -27,7 +29,20 @@ const updateAdvancedBillingSchema = z.object({
 });
 
 const replaceRangesSchema = z.object({
-  ranges: z.array(rangeSchema)
+  ranges: z.array(rangeSchema),
+  advancedBillingEnabled: z.boolean().optional(),
+  rangeFallbackStrategy: z.nativeEnum(FeeRangeFallbackStrategy).optional()
+});
+
+const globalFeeRuleSchema = z.object({
+  name: z.string().min(2).optional(),
+  type: z.enum(["FLAT", "PERCENTAGE", "HYBRID", "DYNAMIC"]).optional(),
+  flatAmount: z.number().nonnegative().optional(),
+  percentageRate: z.number().nonnegative().optional(),
+  dynamicConfig: z.record(z.any()).optional(),
+  advancedBillingEnabled: z.boolean().optional(),
+  rangeFallbackStrategy: z.nativeEnum(FeeRangeFallbackStrategy).optional(),
+  isActive: z.boolean().optional()
 });
 
 const previewSchema = z.object({
@@ -38,6 +53,41 @@ const previewSchema = z.object({
 });
 
 export async function registerFeeRoutes(app: FastifyInstance) {
+  // Global Fee Rule endpoints
+  app.get("/internal/fee-rules/global", { preHandler: [verifyInternalService] }, async () => {
+    return (await getActiveGlobalFeeRule()) ?? null;
+  });
+
+  app.put("/internal/fee-rules/global", { preHandler: [verifyInternalService] }, async (request, reply) => {
+    const parsed = globalFeeRuleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "Invalid global fee rule payload" });
+    }
+    return reply.send(await updateOrCreateGlobalFeeRule(parsed.data));
+  });
+
+  app.put("/internal/fee-rules/global/ranges", { preHandler: [verifyInternalService] }, async (request, reply) => {
+    const parsed = replaceRangesSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "Invalid fee rule ranges payload" });
+    }
+
+    const globalRule = await updateOrCreateGlobalFeeRule({});
+    try {
+      return reply.send(
+        await replaceFeeRuleRanges(globalRule.id, parsed.data.ranges, {
+          advancedBillingEnabled: parsed.data.advancedBillingEnabled,
+          rangeFallbackStrategy: parsed.data.rangeFallbackStrategy
+        })
+      );
+    } catch (error) {
+      if (error instanceof FeeRuleRangeValidationError) {
+        return reply.code(400).send({ message: error.message });
+      }
+      return reply.code(500).send({ message: "Unable to update global fee rule ranges" });
+    }
+  });
+
   app.put("/internal/fee-rules/:id/advanced-billing", { preHandler: [verifyInternalService] }, async (request, reply) => {
     const parsed = updateAdvancedBillingSchema.safeParse(request.body);
 
@@ -64,7 +114,12 @@ export async function registerFeeRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
 
     try {
-      return reply.send(await replaceFeeRuleRanges(id, parsed.data.ranges));
+      return reply.send(
+        await replaceFeeRuleRanges(id, parsed.data.ranges, {
+          advancedBillingEnabled: parsed.data.advancedBillingEnabled,
+          rangeFallbackStrategy: parsed.data.rangeFallbackStrategy
+        })
+      );
     } catch (error) {
       if (error instanceof FeeRuleRangeValidationError) {
         return reply.code(400).send({ message: error.message });
@@ -92,3 +147,4 @@ export async function registerFeeRoutes(app: FastifyInstance) {
     }
   });
 }
+

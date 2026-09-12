@@ -1,6 +1,7 @@
 import type { GatewayProvider, Prisma } from "@prisma/client";
 import { prisma } from "../../config/db.js";
 import { GATEWAY_PROVIDERS } from "../providers/provider-registry.js";
+import { invalidateFeeRuleRoutingCache } from "../transactions/routing-cache.js";
 
 type FeeRuleTypeValue = "FLAT" | "PERCENTAGE" | "HYBRID" | "DYNAMIC";
 
@@ -221,6 +222,8 @@ export async function createFeeRule(
     flatAmount?: number;
     percentageRate?: number;
     dynamicConfig?: Record<string, unknown>;
+    advancedBillingEnabled?: boolean;
+    rangeFallbackStrategy?: "USE_STANDARD_RULE" | "REJECT" | "ZERO_FEE";
     isActive?: boolean;
   }
 ) {
@@ -245,6 +248,8 @@ export async function createFeeRule(
         flatAmount: input.flatAmount?.toFixed(2),
         percentageRate: input.percentageRate?.toFixed(4),
         dynamicConfig: input.dynamicConfig as Prisma.InputJsonValue | undefined,
+        advancedBillingEnabled: input.advancedBillingEnabled ?? false,
+        rangeFallbackStrategy: input.rangeFallbackStrategy ?? "USE_STANDARD_RULE",
         isActive: input.isActive ?? true
       }
     });
@@ -261,6 +266,7 @@ export async function createFeeRule(
           flatAmount: input.flatAmount,
           percentageRate: input.percentageRate,
           hasDynamicConfig: Boolean(input.dynamicConfig),
+          advancedBillingEnabled: input.advancedBillingEnabled ?? false,
           isActive: input.isActive ?? true
         }
       }
@@ -268,6 +274,8 @@ export async function createFeeRule(
 
     return feeRule;
   });
+
+  invalidateFeeRuleRoutingCache(organizationId);
 
   return {
     feeRule,
@@ -278,6 +286,53 @@ export async function createFeeRule(
   };
 }
 
+export async function activateFeeRule(feeRuleId: string) {
+  const current = await prisma.feeRule.findUniqueOrThrow({
+    where: { id: feeRuleId }
+  });
+
+  const feeRule = await prisma.$transaction(async (tx) => {
+    if (current.organizationId) {
+      await tx.feeRule.updateMany({
+        where: {
+          organizationId: current.organizationId,
+          isActive: true
+        },
+        data: {
+          isActive: false
+        }
+      });
+    }
+
+    return tx.feeRule.update({
+      where: { id: feeRuleId },
+      data: { isActive: true },
+      include: {
+        ranges: {
+          orderBy: { sortOrder: "asc" }
+        }
+      }
+    });
+  });
+
+  invalidateFeeRuleRoutingCache(current.organizationId ?? undefined);
+
+  await prisma.auditLog.create({
+    data: {
+      actorType: "INTERNAL_SERVICE",
+      action: "fee_rule.activated",
+      entityType: "FeeRule",
+      entityId: feeRule.id,
+      payload: {
+        organizationId: current.organizationId,
+        name: feeRule.name
+      }
+    }
+  });
+
+  return feeRule;
+}
+
 export async function updateFeeRule(
   feeRuleId: string,
   input: {
@@ -286,6 +341,8 @@ export async function updateFeeRule(
     flatAmount?: number;
     percentageRate?: number;
     dynamicConfig?: Record<string, unknown>;
+    advancedBillingEnabled?: boolean;
+    rangeFallbackStrategy?: "USE_STANDARD_RULE" | "REJECT" | "ZERO_FEE";
     isActive?: boolean;
   }
 ) {
@@ -315,6 +372,8 @@ export async function updateFeeRule(
         percentageRate:
           input.percentageRate === undefined ? undefined : input.percentageRate.toFixed(4),
         dynamicConfig: input.dynamicConfig as Prisma.InputJsonValue | undefined,
+        advancedBillingEnabled: input.advancedBillingEnabled,
+        rangeFallbackStrategy: input.rangeFallbackStrategy,
         isActive: input.isActive
       }
     });
@@ -330,6 +389,7 @@ export async function updateFeeRule(
           flatAmount: input.flatAmount,
           percentageRate: input.percentageRate,
           hasDynamicConfig: Boolean(input.dynamicConfig),
+          advancedBillingEnabled: input.advancedBillingEnabled,
           isActive: input.isActive
         }
       }
@@ -338,12 +398,16 @@ export async function updateFeeRule(
     return feeRule;
   });
 
+  invalidateFeeRuleRoutingCache(current.organizationId ?? undefined);
+
   return {
     feeRule,
-    organization: await prisma.organization.findUniqueOrThrow({
-      where: { id: current.organizationId },
-      include: organizationInclude
-    })
+    organization: current.organizationId
+      ? await prisma.organization.findUniqueOrThrow({
+          where: { id: current.organizationId },
+          include: organizationInclude
+        })
+      : null
   };
 }
 
