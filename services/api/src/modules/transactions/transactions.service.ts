@@ -29,6 +29,7 @@ import {
 import { isCreditPurchaseTransaction } from "../credits/credits.service.js";
 import { assertProviderCanAcceptTraffic } from "../providers/provider-registry.js";
 import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
+import { classifyPaymentFailure } from "../payments/payment-failure-semantics.js";
 import { getActiveFeeRuleForOrganization } from "../fees/fee-rules.service.js";
 import {
   getCachedRoutingDependency,
@@ -325,8 +326,9 @@ export async function createTransaction(input: {
   });
   timer.mark("provider-charge");
 
+  const failure = result.status === "FAILED" ? classifyPaymentFailure(result.raw) : null;
   const nextStatus =
-    result.status === "FAILED" ? "FAILED" : result.status === "SUCCESS" ? "SUCCEEDED" : "PROCESSING";
+    result.status === "FAILED" ? failure?.transactionStatus ?? "FAILED" : result.status === "SUCCESS" ? "SUCCEEDED" : "PROCESSING";
 
   await prisma.$transaction([
     prisma.paymentAttempt.create({
@@ -335,7 +337,7 @@ export async function createTransaction(input: {
         gatewayConfigId: gateway.id,
         livemode,
         status:
-          result.status === "FAILED"
+          ["FAILED", "CANCELLED", "EXPIRED"].includes(nextStatus)
             ? "FAILED"
             : result.status === "SUCCESS"
               ? "SUCCESS"
@@ -352,7 +354,7 @@ export async function createTransaction(input: {
       where: { id: transaction.id },
       data: {
         status: nextStatus,
-        failureReason: result.status === "FAILED" ? "Gateway returned failure status" : null
+        failureReason: failure?.customerMessage ?? null
       }
     }),
     prisma.transactionEvent.createMany({
@@ -460,30 +462,30 @@ export async function createTransaction(input: {
     });
   }
 
-  if (isCreditPurchase && (nextStatus === "SUCCEEDED" || nextStatus === "FAILED")) {
+  if (isCreditPurchase && ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextStatus)) {
     const { maybeFinalizeCreditPurchaseFromTransaction } = await import("../credits/credits.service.js");
     await maybeFinalizeCreditPurchaseFromTransaction({
       id: transaction.id,
       status: nextStatus,
       metadata: transactionMetadata,
       settlementAmount: settlement.settlementAmount,
-      failureReason: nextStatus === "FAILED" ? "Gateway returned failure status" : null,
+      failureReason: failure?.customerMessage ?? null,
       livemode: transaction.livemode
     });
   }
 
-  if (isRecipientVerification && (nextStatus === "SUCCEEDED" || nextStatus === "FAILED")) {
+  if (isRecipientVerification && ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextStatus)) {
     const { maybeFinalizeRecipientVerificationFromTransaction } = await import("../destination-profiles/destination-profiles.service.js");
     await maybeFinalizeRecipientVerificationFromTransaction({
       id: transaction.id,
       appId: transaction.appId,
       status: nextStatus,
       metadata: transactionMetadata,
-      failureReason: nextStatus === "FAILED" ? "Gateway returned failure status" : null
+      failureReason: failure?.customerMessage ?? null
     });
   }
 
-  if (retryQueue) {
+  if (nextStatus === "PROCESSING" && retryQueue) {
     const queue = retryQueue;
     const retryResult = await addQueueJobSafely("retry-queue", () =>
       queue.add(
@@ -508,7 +510,7 @@ export async function createTransaction(input: {
         }
       });
     }
-  } else {
+  } else if (nextStatus === "PROCESSING") {
     await prisma.retryJob.create({
       data: {
         transactionId: transaction.id,

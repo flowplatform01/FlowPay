@@ -33,6 +33,81 @@ export async function listPayoutCoordinations() {
   });
 }
 
+export async function queryPayoutCoordinations(input: {
+  search?: string;
+  status?: string;
+  provider?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number | string;
+  limit?: number | string;
+}) {
+  const page = Math.max(1, Number(input.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(input.limit) || 20));
+  const skip = (page - 1) * limit;
+
+  const where: Prisma.PayoutCoordinationWhereInput = {};
+
+  if (input.status && input.status !== "ALL") {
+    where.status = input.status as PayoutCoordinationStatus;
+  }
+
+  if (input.provider && input.provider !== "ALL") {
+    where.provider = input.provider as GatewayProvider;
+  }
+
+  if (input.startDate || input.endDate) {
+    where.createdAt = {};
+    if (input.startDate) where.createdAt.gte = new Date(input.startDate);
+    if (input.endDate) {
+      const end = new Date(input.endDate);
+      end.setHours(23, 59, 59, 999);
+      where.createdAt.lte = end;
+    }
+  }
+
+  if (input.search && input.search.trim()) {
+    const s = input.search.trim();
+    where.OR = [
+      { id: { contains: s, mode: "insensitive" } },
+      { failureReason: { contains: s, mode: "insensitive" } },
+      { transaction: { externalReference: { contains: s, mode: "insensitive" } } },
+      { destinationProfile: { externalRecipientId: { contains: s, mode: "insensitive" } } },
+      { destinationProfile: { payoutTarget: { contains: s, mode: "insensitive" } } }
+    ];
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.payoutCoordination.findMany({
+      where,
+      include: {
+        transaction: {
+          include: {
+            app: true,
+            organization: true
+          }
+        },
+        destinationProfile: true
+      },
+      orderBy: { updatedAt: "desc" },
+      skip,
+      take: limit
+    }),
+    prisma.payoutCoordination.count({ where })
+  ]);
+
+  const totalPages = Math.ceil(total / limit);
+
+  return {
+    items,
+    total,
+    page,
+    limit,
+    totalPages,
+    hasMore: page < totalPages
+  };
+}
+
 export async function processDuePayoutCoordinations(limit = 25) {
   const cutoff = new Date(Date.now() - 30_000);
   const items = await prisma.payoutCoordination.findMany({

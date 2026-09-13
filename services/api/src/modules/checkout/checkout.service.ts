@@ -19,6 +19,7 @@ import {
 } from "../payments/payment-channels.js";
 import { CONFIRMATION_GATEWAY_WORKFLOWS } from "../confirmation-gateway/confirmation-gateway.types.js";
 import { getCreditBalance } from "../credits/credits.service.js";
+import { classifyPaymentFailure } from "../payments/payment-failure-semantics.js";
 
 type GatewayProviderValue = GatewayProvider;
 
@@ -436,13 +437,16 @@ export async function executeAsynchronousCharge(input: {
       });
     }
 
+    const failure = classifyPaymentFailure({ message });
+    const terminalStatus = failure.transactionStatus === "PROCESSING" ? "FAILED" : failure.transactionStatus;
+
     await prisma.$transaction(
       async (tx) => {
-      await tx.transaction.update({
-        where: { id: transaction.id },
-        data: {
-          status: "FAILED",
-          failureReason: message
+        await tx.transaction.update({
+          where: { id: transaction.id },
+          data: {
+            status: terminalStatus,
+            failureReason: failure.customerMessage
           }
         });
 
@@ -456,7 +460,7 @@ export async function executeAsynchronousCharge(input: {
 
         await finalizeSettlementsForTransaction(tx, {
           transactionId: transaction.id,
-          status: "FAILED",
+          status: terminalStatus,
           orchestrationMode: transaction.orchestrationMode,
           settlementStrategy: transaction.settlementStrategy
         });
@@ -467,10 +471,10 @@ export async function executeAsynchronousCharge(input: {
     const { maybeFinalizeCreditPurchaseFromTransaction } = await import("../credits/credits.service.js");
     await maybeFinalizeCreditPurchaseFromTransaction({
       id: transaction.id,
-      status: "FAILED",
+      status: terminalStatus,
       metadata: transaction.metadata,
       settlementAmount: transaction.settlementAmount,
-      failureReason: message,
+      failureReason: failure.customerMessage,
       livemode: transaction.livemode
     });
 
@@ -478,9 +482,9 @@ export async function executeAsynchronousCharge(input: {
     await maybeFinalizeRecipientVerificationFromTransaction({
       id: transaction.id,
       appId: transaction.appId,
-      status: "FAILED",
+      status: terminalStatus,
       metadata: transaction.metadata,
-      failureReason: message
+      failureReason: failure.customerMessage
     });
 
     return prisma.transaction.findUniqueOrThrow({
@@ -489,14 +493,17 @@ export async function executeAsynchronousCharge(input: {
     });
   }
 
-  const transientGatewayFailure = result.status === "FAILED" && isTransientGatewayResult(result.raw);
+  const failure = result.status === "FAILED" ? classifyPaymentFailure(result.raw) : null;
+  const transientGatewayFailure = result.status === "FAILED" && (failure?.retryable || isTransientGatewayResult(result.raw));
   const nextStatus: TransactionStatus =
     result.status === "FAILED" && !transientGatewayFailure
-      ? "FAILED"
+      ? failure?.transactionStatus ?? "FAILED"
       : result.status === "SUCCESS"
         ? "SUCCEEDED"
         : "PROCESSING";
-  const failureReason = nextStatus === "FAILED" ? extractGatewayFailureReason(result.raw) : null;
+  const failureReason = ["FAILED", "CANCELLED", "EXPIRED"].includes(nextStatus)
+    ? failure?.customerMessage ?? "Payment could not be completed. Please try again."
+    : null;
   const gatewayReference = hasConfirmedProviderReference(result.raw) ? result.providerReference : null;
 
   await withTransientDbRetry(
@@ -508,7 +515,7 @@ export async function executeAsynchronousCharge(input: {
               transactionId: transaction.id,
               gatewayConfigId: gateway.id,
               livemode: transaction.livemode,
-              status: nextStatus === "FAILED" ? "FAILED" : nextStatus === "SUCCEEDED" ? "SUCCESS" : "PENDING",
+              status: ["FAILED", "CANCELLED", "EXPIRED"].includes(nextStatus) ? "FAILED" : nextStatus === "SUCCEEDED" ? "SUCCESS" : "PENDING",
               gatewayReference,
               requestPayload: {
                 paymentMethod: input.paymentMethod,
@@ -646,7 +653,7 @@ export async function executeAsynchronousCharge(input: {
     );
   }
 
-  if (nextStatus === "SUCCEEDED" || nextStatus === "FAILED") {
+  if (["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextStatus)) {
     const { maybeFinalizeCreditPurchaseFromTransaction } = await import("../credits/credits.service.js");
     await maybeFinalizeCreditPurchaseFromTransaction({
       id: transaction.id,
@@ -724,21 +731,6 @@ function isTransientPrismaError(error: unknown) {
   );
 }
 
-function extractGatewayFailureReason(raw: Record<string, unknown>) {
-  const candidate =
-    readString(raw.message) ??
-    readString(raw.error) ??
-    readString(raw.reason) ??
-    readString(raw.status_message) ??
-    readString(raw.statusMessage);
-
-  if (!candidate) {
-    return "Payment authorization failed";
-  }
-
-  return candidate.replace(/\s+/g, " ").trim().slice(0, 240);
-}
-
 function isTransientGatewayResult(raw: Record<string, unknown>) {
   if (raw.transientFailure === true) return true;
 
@@ -760,10 +752,6 @@ function isRetryableGatewayException(error: unknown) {
   return /abort|timeout|timed out|fetch failed|network|socket|econnreset|econnrefused|eai_again|enotfound|503|502|504|429/i.test(
     message
   );
-}
-
-function readString(value: unknown) {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 async function safeQueueAdd(label: string, enqueue: () => Promise<unknown>) {

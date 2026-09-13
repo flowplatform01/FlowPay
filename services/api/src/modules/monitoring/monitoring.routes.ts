@@ -3,7 +3,11 @@ import { prisma } from "../../config/db.js";
 import { verifyInternalService } from "../auth/internal-auth.guard.js";
 import { listAuditLogs } from "../audit/audit.service.js";
 import { chargeQueue, retryQueue, webhookQueue } from "../../lib/queues.js";
-import { listPayoutCoordinations, processPayoutCoordination } from "../payouts/payout-coordination.service.js";
+import {
+  listPayoutCoordinations,
+  processPayoutCoordination,
+  queryPayoutCoordinations
+} from "../payouts/payout-coordination.service.js";
 import { isRedisCircuitOpen, isRedisQuotaError, openRedisCircuit } from "../../config/redis.js";
 
 export async function registerMonitoringRoutes(app: FastifyInstance) {
@@ -54,6 +58,15 @@ export async function registerMonitoringRoutes(app: FastifyInstance) {
 
   app.get("/internal/monitoring/payout-coordinations", { preHandler: [verifyInternalService] }, async () =>
     listPayoutCoordinations()
+  );
+
+  app.get(
+    "/internal/monitoring/payout-coordinations/search",
+    { preHandler: [verifyInternalService] },
+    async (request) => {
+      const query = request.query as any;
+      return queryPayoutCoordinations(query);
+    }
   );
 
   app.post(

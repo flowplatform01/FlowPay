@@ -6,7 +6,8 @@ import {
   createRevenuePayout,
   getRevenuePayoutBalance,
   listRevenuePayouts,
-  processRevenuePayout
+  processRevenuePayout,
+  queryRevenuePayouts
 } from "./revenue-payouts.service.js";
 
 const balanceQuerySchema = z.object({
@@ -28,6 +29,11 @@ export async function registerRevenuePayoutRoutes(app: FastifyInstance) {
   app.get("/internal/revenue-payouts", { preHandler: [verifyInternalService] }, async (request) => {
     const query = request.query as { organizationId?: string };
     return listRevenuePayouts(query.organizationId);
+  });
+
+  app.get("/internal/revenue-payouts/search", { preHandler: [verifyInternalService] }, async (request) => {
+    const query = request.query as any;
+    return queryRevenuePayouts(query);
   });
 
   app.get("/internal/revenue-payouts/balance", { preHandler: [verifyInternalService] }, async (request, reply) => {

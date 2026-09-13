@@ -10,6 +10,7 @@ import { processGatewayWebhook } from "../modules/webhooks/gateway-webhook.servi
 import { processDuePayoutCoordinations } from "../modules/payouts/payout-coordination.service.js";
 import { executeAsynchronousCharge } from "../modules/checkout/checkout.service.js";
 import { processDueRevenuePayouts } from "../modules/revenue-payouts/revenue-payouts.service.js";
+import { processDueTreasuryWithdrawals } from "../modules/treasury/treasury.service.js";
 import { expireStalePendingCheckoutTransactions } from "../modules/transactions/transactions.service.js";
 import { GATEWAY_PROVIDERS, providerHasOperationalRuntime } from "../modules/providers/provider-registry.js";
 
@@ -191,6 +192,15 @@ setInterval(() => {
 runWorkerSweep("revenue payout execution", processDueRevenuePayouts);
 setInterval(() => {
   runWorkerSweep("revenue payout execution", processDueRevenuePayouts);
+}, 60_000).unref();
+
+runWorkerSweep("treasury withdrawal reconciliation", async () => {
+  await processDueTreasuryWithdrawals();
+});
+setInterval(() => {
+  runWorkerSweep("treasury withdrawal reconciliation", async () => {
+    await processDueTreasuryWithdrawals();
+  });
 }, 60_000).unref();
 
 setInterval(() => {

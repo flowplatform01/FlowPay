@@ -5,6 +5,7 @@ import { getGatewayAdapter } from "../gateways/gateways.service.js";
 import type { GatewayStatusOperation, GatewayStatusResult } from "../gateways/gateway.types.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
 import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
+import { classifyPaymentFailure } from "../payments/payment-failure-semantics.js";
 
 const terminalStatuses: TransactionStatus[] = ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED", "UNDER_REVIEW"];
 
@@ -120,13 +121,20 @@ export async function reconcileTransaction(input: {
     return { reconciled: false, status: transaction.status, deduplicated: true };
   }
 
+  const failure = inferredStatus === "FAILED"
+    ? classifyPaymentFailure(providerStatus.result?.raw ?? latestAttempt?.responsePayload, {
+        providerReportedTerminal: Boolean(providerStatus.result?.status === "FAILED")
+      })
+    : null;
+  const finalStatus = failure?.transactionStatus ?? inferredStatus;
+
   await prisma.$transaction(
     async (tx) => {
       await tx.transaction.update({
         where: { id: transaction.id },
         data: {
-          status: inferredStatus,
-          failureReason: inferredStatus === "FAILED" ? "Reconciliation inferred gateway failure" : null
+          status: finalStatus,
+          failureReason: failure?.customerMessage ?? null
         }
       });
 
@@ -134,7 +142,7 @@ export async function reconcileTransaction(input: {
         await tx.paymentAttempt.update({
           where: { id: latestAttempt.id },
           data: {
-            status: inferredStatus === "SUCCEEDED" ? "SUCCESS" : "FAILED",
+            status: finalStatus === "SUCCEEDED" ? "SUCCESS" : "FAILED",
             completedAt: new Date()
           }
         });
@@ -143,10 +151,10 @@ export async function reconcileTransaction(input: {
       await tx.transactionEvent.create({
         data: {
           transactionId: transaction.id,
-          eventType: `transaction.reconciled.${inferredStatus.toLowerCase()}`,
+          eventType: `transaction.reconciled.${finalStatus.toLowerCase()}`,
           payload: {
             previousStatus: transaction.status,
-            inferredStatus,
+            inferredStatus: finalStatus,
             latestAttemptId: latestAttempt?.id,
             providerStatus: providerStatus.result
           } as Prisma.InputJsonValue
@@ -155,7 +163,7 @@ export async function reconcileTransaction(input: {
 
       await finalizeSettlementsForTransaction(tx, {
         transactionId: transaction.id,
-        status: inferredStatus,
+        status: finalStatus,
         orchestrationMode: transaction.orchestrationMode,
         settlementStrategy: transaction.settlementStrategy
       });
@@ -205,10 +213,10 @@ export async function reconcileTransaction(input: {
     transactionId: transaction.id,
     status: "SUCCEEDED",
     attempts: input.attempt,
-    reason: `Reconciled transaction to ${inferredStatus}`,
+      reason: `Reconciled transaction to ${finalStatus}`,
     payload: {
       previousStatus: transaction.status,
-      inferredStatus,
+      inferredStatus: finalStatus,
       providerStatus: providerStatus.result
     }
   });
@@ -220,10 +228,10 @@ export async function reconcileTransaction(input: {
         "dispatch-app-webhook",
         {
           transactionId: transaction.id,
-          eventType: `transaction.${inferredStatus.toLowerCase()}`
+          eventType: `transaction.${finalStatus.toLowerCase()}`
         },
         {
-          jobId: `webhook:${transaction.id}:transaction.${inferredStatus.toLowerCase()}`
+          jobId: `webhook:${transaction.id}:transaction.${finalStatus.toLowerCase()}`
         }
       )
     );
@@ -235,7 +243,7 @@ export async function reconcileTransaction(input: {
         attempts: input.attempt,
         reason: `Webhook queue unavailable after reconciliation: ${queueResult.reason}`,
         payload: {
-          inferredStatus
+          inferredStatus: finalStatus
         }
       });
     }
@@ -244,7 +252,7 @@ export async function reconcileTransaction(input: {
   const { maybeFinalizeCreditPurchaseFromTransaction } = await import("../credits/credits.service.js");
   await maybeFinalizeCreditPurchaseFromTransaction({
     id: transaction.id,
-    status: inferredStatus,
+    status: finalStatus,
     metadata: transaction.metadata,
     settlementAmount: transaction.settlementAmount,
     failureReason: transaction.failureReason,
@@ -255,12 +263,12 @@ export async function reconcileTransaction(input: {
   await maybeFinalizeRecipientVerificationFromTransaction({
     id: transaction.id,
     appId: transaction.appId,
-    status: inferredStatus,
+    status: finalStatus,
     metadata: transaction.metadata,
     failureReason: transaction.failureReason
   });
 
-  return { reconciled: true, status: inferredStatus };
+  return { reconciled: true, status: finalStatus };
 }
 
 async function fetchProviderStatus(

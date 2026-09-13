@@ -40,6 +40,8 @@ type CheckoutClientProps = {
 
 type CheckoutPaymentMethod = CheckoutSession["paymentMethods"][number];
 
+const isFailureStatus = (status: string) => ["FAILED", "CANCELLED", "EXPIRED"].includes(status);
+
 const shellClass = (embed: boolean) =>
   embed
     ? "flex min-h-full h-full flex-col items-center bg-surface-50 p-3"
@@ -141,7 +143,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
         setSelectedMethod((current) => selectAvailableMethod(latest, current));
         setStatusNotice(null);
 
-        if (latest.status === "FAILED") {
+        if (isFailureStatus(latest.status)) {
           setFailureMessage(latest.failureReason ?? "Payment could not be completed.");
         }
       } catch {
@@ -198,7 +200,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
           setSessionData(latest);
           setSelectedMethod((current) => selectAvailableMethod(latest, current));
           setStatusNotice(null);
-          if (latest.status === "FAILED") {
+          if (isFailureStatus(latest.status)) {
             setFailureMessage(latest.failureReason ?? "Payment could not be completed.");
           }
 
@@ -252,7 +254,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
   const status = sessionData?.status ?? "PENDING";
   const isSuccess = status === "SUCCEEDED";
   const isReview = status === "UNDER_REVIEW";
-  const isFailed = ["FAILED", "CANCELLED", "EXPIRED"].includes(status) || Boolean(failureMessage);
+  const isFailed = isFailureStatus(status) || Boolean(failureMessage);
   const visibleFailureMessage = failureMessage ?? sessionData?.failureReason ?? null;
   const isAwaitingConfirmation = status === "PROCESSING";
   const hasRecipientContext = Boolean(sessionData?.recipientName || sessionData?.recipientAccount);
@@ -285,7 +287,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
       setSessionData(result);
       let finalSession: CheckoutSession = result;
 
-      if (result.status === "FAILED") {
+      if (isFailureStatus(result.status)) {
         setFailureMessage(result.failureReason || result.message || "Payment could not be completed.");
       }
 
@@ -305,7 +307,7 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
             ? "Payment confirmed."
             : finalSession.status === "UNDER_REVIEW"
               ? "Payment is being reviewed."
-            : finalSession.status === "FAILED"
+            : isFailureStatus(finalSession.status)
               ? finalSession.failureReason ?? "Payment could not be completed."
               : "Payment is still waiting for confirmation."
       });

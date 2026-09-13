@@ -4,6 +4,8 @@ import { addQueueJobSafely, webhookQueue } from "../../lib/queues.js";
 import { finalizeSettlementsForTransaction } from "../settlements/settlements.service.js";
 import { recordPlatformFeeCapture } from "../treasury/treasury.service.js";
 import { processRevenuePayoutProviderWebhook } from "../revenue-payouts/revenue-payouts.service.js";
+import { processTreasuryWithdrawalProviderWebhook } from "../treasury/treasury.service.js";
+import { classifyPaymentFailure } from "../payments/payment-failure-semantics.js";
 
 type GatewayProviderValue = GatewayProvider;
 
@@ -22,7 +24,9 @@ export async function processGatewayWebhook(
 ): Promise<GatewayWebhookResult> {
   const providerReference = extractProviderReference(provider, payload);
   const externalReference = extractExternalReference(payload);
-  const mappedStatus = mapProviderStatus(provider, payload);
+  const providerStatus = mapProviderStatus(provider, payload);
+  const failure = providerStatus === "FAILED" ? classifyPaymentFailure(payload, { providerReportedTerminal: true }) : null;
+  const mappedStatus = failure?.transactionStatus ?? providerStatus;
 
   if (!providerReference && !externalReference) {
     return { processed: false, reason: "No transaction reference found in webhook payload" };
@@ -53,7 +57,12 @@ export async function processGatewayWebhook(
       return payoutResult;
     }
 
-    return { processed: false, reason: "Transaction or revenue payout not found for webhook payload" };
+    const treasuryResult = await processTreasuryWithdrawalProviderWebhook(provider, payload);
+    if (treasuryResult.processed) {
+      return treasuryResult;
+    }
+
+    return { processed: false, reason: "Transaction, revenue payout, or treasury withdrawal not found for webhook payload" };
   }
 
   if (transaction.selectedProvider !== provider) {
@@ -82,7 +91,7 @@ export async function processGatewayWebhook(
         where: { id: transaction.id },
         data: {
           status: mappedStatus,
-          failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null
+          failureReason: failure?.customerMessage ?? null
         }
       });
 
@@ -189,7 +198,7 @@ export async function processGatewayWebhook(
       status: mappedStatus,
       metadata: transaction.metadata,
       settlementAmount: transaction.settlementAmount,
-      failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null,
+      failureReason: failure?.customerMessage ?? null,
       livemode: transaction.livemode
     });
 
@@ -199,7 +208,7 @@ export async function processGatewayWebhook(
       appId: transaction.appId,
       status: mappedStatus,
       metadata: transaction.metadata,
-      failureReason: mappedStatus === "FAILED" ? extractFailureReason(payload) : null
+      failureReason: failure?.customerMessage ?? null
     });
   }
 
@@ -243,12 +252,6 @@ function extractExternalReference(payload: Record<string, unknown>) {
   }
 
   return undefined;
-}
-
-function extractFailureReason(payload: Record<string, unknown>) {
-  const candidates = [payload.reason, payload.message, payload.error, payload.description];
-  const value = candidates.find((item) => typeof item === "string" && item.length > 0);
-  return value?.toString() ?? "Gateway reported failure";
 }
 
 function mapProviderStatus(provider: GatewayProviderValue, payload: Record<string, unknown>): TransactionStatus {

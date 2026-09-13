@@ -85,6 +85,81 @@ export async function listRevenuePayouts(organizationId?: string) {
   });
 }
 
+export async function queryRevenuePayouts(input: {
+  organizationId?: string;
+  search?: string;
+  status?: string;
+  provider?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number | string;
+  limit?: number | string;
+}) {
+  const page = Math.max(1, Number(input.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(input.limit) || 20));
+  const skip = (page - 1) * limit;
+
+  const where: Prisma.RevenuePayoutWhereInput = {};
+
+  if (input.organizationId) {
+    where.organizationId = input.organizationId;
+  }
+
+  if (input.status && input.status !== "ALL") {
+    where.status = input.status as RevenuePayoutStatus;
+  }
+
+  if (input.provider && input.provider !== "ALL") {
+    where.provider = input.provider as GatewayProvider;
+  }
+
+  if (input.startDate || input.endDate) {
+    where.createdAt = {};
+    if (input.startDate) where.createdAt.gte = new Date(input.startDate);
+    if (input.endDate) {
+      const end = new Date(input.endDate);
+      end.setHours(23, 59, 59, 999);
+      where.createdAt.lte = end;
+    }
+  }
+
+  if (input.search && input.search.trim()) {
+    const s = input.search.trim();
+    where.OR = [
+      { id: { contains: s, mode: "insensitive" } },
+      { failureReason: { contains: s, mode: "insensitive" } },
+      { organization: { name: { contains: s, mode: "insensitive" } } },
+      { payoutDestination: { label: { contains: s, mode: "insensitive" } } },
+      { payoutDestination: { destinationRef: { contains: s, mode: "insensitive" } } }
+    ];
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.revenuePayout.findMany({
+      where,
+      include: {
+        organization: true,
+        payoutDestination: true
+      },
+      orderBy: { updatedAt: "desc" },
+      skip,
+      take: limit
+    }),
+    prisma.revenuePayout.count({ where })
+  ]);
+
+  const totalPages = Math.ceil(total / limit);
+
+  return {
+    items,
+    total,
+    page,
+    limit,
+    totalPages,
+    hasMore: page < totalPages
+  };
+}
+
 export async function processDueRevenuePayouts(limit = 25) {
   const items = await prisma.revenuePayout.findMany({
     where: {

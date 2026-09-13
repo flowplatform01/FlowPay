@@ -364,6 +364,141 @@ export async function executeTreasuryWithdrawal(id: string, actorId?: string | n
   }
 }
 
+/**
+ * Reconciles asynchronous provider payouts without re-submitting them. Treasury
+ * stays isolated from tenant revenue and coordinated-payout lifecycles.
+ */
+export async function reconcileTreasuryWithdrawal(id: string, actorId?: string | null) {
+  const withdrawal = await prisma.treasuryWithdrawal.findUnique({ where: { id } });
+
+  if (!withdrawal || withdrawal.status !== "PROCESSING") {
+    return { processed: false, status: withdrawal?.status ?? "NOT_FOUND", skipped: true };
+  }
+
+  if (!withdrawal.providerReference || !withdrawal.provider) {
+    return { processed: false, status: withdrawal.status, skipped: true, reason: "Provider reference is not available" };
+  }
+
+  const adapter = getGatewayAdapter(withdrawal.provider);
+  if (!adapter.getTransactionStatus) {
+    return {
+      processed: false,
+      status: withdrawal.status,
+      skipped: true,
+      reason: `${withdrawal.provider} does not expose payout status lookup`
+    };
+  }
+
+  const result = await adapter.getTransactionStatus(withdrawal.providerReference, undefined, "payout");
+
+  if (result.status === "SUCCESS") {
+    const updated = await markTreasuryWithdrawalSucceeded(
+      withdrawal.id,
+      result.providerReference ?? withdrawal.providerReference,
+      result.raw,
+      actorId
+    );
+    return { processed: true, status: updated.status, providerReference: updated.providerReference };
+  }
+
+  if (result.status === "FAILED") {
+    const reason = readTreasuryProviderFailure(result.raw);
+    const updated = await reverseTreasuryWithdrawal(withdrawal.id, "FAILED", actorId, reason, result.raw);
+    return { processed: true, status: updated.status, reason };
+  }
+
+  await prisma.treasuryWithdrawal.updateMany({
+    where: { id: withdrawal.id, status: "PROCESSING" },
+    data: {
+      providerReference: result.providerReference ?? withdrawal.providerReference,
+      responsePayload: result.raw as Prisma.InputJsonValue
+    }
+  });
+
+  return { processed: false, status: "PROCESSING", pending: true };
+}
+
+export async function processDueTreasuryWithdrawals(limit = 25) {
+  const withdrawals = await prisma.treasuryWithdrawal.findMany({
+    where: {
+      status: "PROCESSING",
+      provider: { not: null },
+      providerReference: { not: null },
+      updatedAt: { lt: new Date(Date.now() - 20_000) }
+    },
+    select: { id: true },
+    orderBy: { updatedAt: "asc" },
+    take: Math.min(Math.max(limit, 1), 100)
+  });
+
+  for (const withdrawal of withdrawals) {
+    try {
+      await reconcileTreasuryWithdrawal(withdrawal.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[Treasury] Withdrawal ${withdrawal.id} reconciliation deferred: ${message}`);
+    }
+  }
+
+  return { scanned: withdrawals.length };
+}
+
+export async function processTreasuryWithdrawalProviderWebhook(
+  provider: GatewayProvider,
+  payload: Record<string, unknown>
+) {
+  const providerReference = readTreasuryProviderReference(payload);
+  const externalReference = readTreasuryExternalReference(payload);
+
+  if (!providerReference && !externalReference) {
+    return { processed: false, reason: "No treasury withdrawal reference found in webhook payload" };
+  }
+
+  const withdrawal = await prisma.treasuryWithdrawal.findFirst({
+    where: {
+      provider,
+      status: "PROCESSING",
+      OR: [
+        ...(providerReference ? [{ providerReference }] : []),
+        ...(externalReference ? [{ idempotencyKey: externalReference }] : [])
+      ]
+    }
+  });
+
+  if (!withdrawal) {
+    return { processed: false, reason: "Treasury withdrawal not found for webhook payload" };
+  }
+
+  const status = mapTreasuryProviderStatus(payload);
+  if (status === "SUCCESS") {
+    const updated = await markTreasuryWithdrawalSucceeded(
+      withdrawal.id,
+      providerReference ?? withdrawal.providerReference,
+      payload
+    );
+    return { processed: true, treasuryWithdrawalId: withdrawal.id, status: updated.status };
+  }
+
+  if (status === "FAILED") {
+    const reason = readTreasuryProviderFailure(payload);
+    const updated = await reverseTreasuryWithdrawal(withdrawal.id, "FAILED", undefined, reason, payload);
+    return { processed: true, treasuryWithdrawalId: withdrawal.id, status: updated.status, reason };
+  }
+
+  await prisma.treasuryWithdrawal.updateMany({
+    where: { id: withdrawal.id, status: "PROCESSING" },
+    data: {
+      providerReference: providerReference ?? withdrawal.providerReference,
+      responsePayload: {
+        ...asTreasuryRecord(withdrawal.responsePayload),
+        webhook: payload
+      } as Prisma.InputJsonValue
+    }
+  });
+
+  return { processed: true, treasuryWithdrawalId: withdrawal.id, status: "PROCESSING", pending: true };
+}
+
 export async function getTreasuryOverview() {
   const [
     balanceGroups,
@@ -581,8 +716,8 @@ async function markTreasuryWithdrawalSucceeded(
   actorId?: string | null
 ) {
   return prisma.$transaction(async (tx) => {
-    const withdrawal = await tx.treasuryWithdrawal.update({
-      where: { id },
+    const claimed = await tx.treasuryWithdrawal.updateMany({
+      where: { id, status: "PROCESSING" },
       data: {
         status: "SUCCEEDED",
         providerReference,
@@ -591,6 +726,12 @@ async function markTreasuryWithdrawalSucceeded(
         failureReason: null
       }
     });
+
+    if (claimed.count !== 1) {
+      return tx.treasuryWithdrawal.findUniqueOrThrow({ where: { id } });
+    }
+
+    const withdrawal = await tx.treasuryWithdrawal.findUniqueOrThrow({ where: { id } });
 
     await tx.treasuryLedgerEntry.updateMany({
       where: {
@@ -653,18 +794,27 @@ async function reverseTreasuryWithdrawal(
       where: { id }
     });
 
-    if (["SUCCEEDED", "CANCELLED"].includes(existing.status)) {
+    if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(existing.status)) {
       return existing;
     }
 
-    const updated = await tx.treasuryWithdrawal.update({
-      where: { id },
+    const claimed = await tx.treasuryWithdrawal.updateMany({
+      where: {
+        id,
+        status: { in: ["PENDING_APPROVAL", "APPROVED", "PROCESSING"] }
+      },
       data: {
         status,
         failureReason: reason ?? null,
         responsePayload: responsePayload === undefined ? undefined : (responsePayload as Prisma.InputJsonValue)
       }
     });
+
+    if (claimed.count !== 1) {
+      return tx.treasuryWithdrawal.findUniqueOrThrow({ where: { id } });
+    }
+
+    const updated = await tx.treasuryWithdrawal.findUniqueOrThrow({ where: { id } });
 
     await tx.treasuryLedgerEntry.create({
       data: {
@@ -707,6 +857,53 @@ async function reverseTreasuryWithdrawal(
 
     return updated;
   });
+}
+
+function mapTreasuryProviderStatus(payload: Record<string, unknown>): "PENDING" | "SUCCESS" | "FAILED" {
+  const status = String(
+    payload.status ?? payload.payment_status ?? payload.transaction_status ?? payload.event ?? ""
+  ).toUpperCase();
+
+  if (status.includes("SUCCESS") || status.includes("COMPLETED") || status.includes("PAID")) return "SUCCESS";
+  if (status.includes("FAIL") || status.includes("CANCEL") || status.includes("REJECT") || status.includes("EXPIRED")) {
+    return "FAILED";
+  }
+
+  return "PENDING";
+}
+
+function readTreasuryProviderReference(payload: Record<string, unknown>) {
+  const value =
+    payload.transId ??
+    payload.providerReference ??
+    payload.reference ??
+    payload.transaction_id ??
+    payload.transactionId ??
+    payload.payment_token;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readTreasuryExternalReference(payload: Record<string, unknown>) {
+  const value =
+    payload.externalId ??
+    payload.external_id ??
+    payload.externalReference ??
+    payload.external_reference ??
+    payload.order_id;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readTreasuryProviderFailure(payload: Record<string, unknown>) {
+  const value = payload.reason ?? payload.message ?? payload.error ?? payload.description;
+  return typeof value === "string" && value.trim()
+    ? value.trim().replace(/\s+/g, " ").slice(0, 500)
+    : "Provider treasury withdrawal execution failed";
+}
+
+function asTreasuryRecord(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {};
 }
 
 async function countMissingTreasuryCaptures() {
