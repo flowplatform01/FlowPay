@@ -151,9 +151,17 @@ export class FapshiGatewayAdapter implements GatewayAdapter {
 
     if (!response.ok) {
       return {
-        status: "PENDING",
+        // A gateway/server interruption leaves the payout outcome unknown, so
+        // reconciliation must retry rather than risk reversing a paid payout.
+        // A Fapshi 4xx is a definitive rejection of this lookup/request and
+        // must not leave a treasury reservation processing indefinitely.
+        status: isTransientFapshiHttpStatus(response.status) ? "PENDING" : "FAILED",
         providerReference,
-        raw: { ...raw, httpStatus: response.status }
+        raw: {
+          ...raw,
+          httpStatus: response.status,
+          statusLookupOutcome: isTransientFapshiHttpStatus(response.status) ? "TRANSIENT_ERROR" : "REJECTED"
+        }
       };
     }
 

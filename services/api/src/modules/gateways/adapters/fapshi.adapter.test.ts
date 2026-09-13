@@ -124,6 +124,20 @@ async function run() {
   assert.equal(payoutStatus.calls[0]?.url, "https://fapshi.test/payment-status/PO-123");
   assert.equal((payoutStatus.calls[0]?.options?.headers as Record<string, string>).apiuser, "payout-user");
 
+  const transientPayoutStatus = await withMockFetch(
+    [{ ok: false, status: 503, body: { message: "Temporary outage" } }],
+    () => adapter.getTransactionStatus("PO-503", "sandbox", "payout")
+  );
+  assert.equal(transientPayoutStatus.result.status, "PENDING");
+  assert.equal(transientPayoutStatus.result.raw.statusLookupOutcome, "TRANSIENT_ERROR");
+
+  const rejectedPayoutStatus = await withMockFetch(
+    [{ ok: false, status: 404, body: { message: "Payout not found" } }],
+    () => adapter.getTransactionStatus("PO-404", "sandbox", "payout")
+  );
+  assert.equal(rejectedPayoutStatus.result.status, "FAILED");
+  assert.equal(rejectedPayoutStatus.result.raw.statusLookupOutcome, "REJECTED");
+
   const collectionOnlyAdapter = new FapshiGatewayAdapter(
     "https://fapshi.test",
     "collection-user",
