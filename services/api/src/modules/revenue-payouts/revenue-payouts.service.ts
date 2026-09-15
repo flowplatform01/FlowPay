@@ -603,15 +603,20 @@ export async function processRevenuePayout(id: string) {
     return { processed: true, status: nextStatus, providerReference: result.providerReference };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const retryable = payout.attempts + 1 < MAX_REVENUE_PAYOUT_ATTEMPTS;
+    const attemptNumber = payout.attempts + 1;
+    const retryable =
+      attemptNumber < MAX_REVENUE_PAYOUT_ATTEMPTS && isRetryableRevenuePayoutError(reason);
+    const nextStatus: RevenuePayoutStatus = retryable ? "PENDING" : "FAILED";
 
     await prisma.revenuePayout.update({
       where: { id: payout.id },
       data: {
-        status: "FAILED",
-        failureReason: reason,
-        nextRunAt: retryable ? nextRevenuePayoutAttemptAt(payout.attempts + 1) : null,
-        responsePayload: { error: reason }
+        // A scheduled retry is not a final financial outcome. Keeping it pending
+        // prevents downstream applications from releasing reserved funds early.
+        status: nextStatus,
+        failureReason: retryable ? null : reason,
+        nextRunAt: retryable ? nextRevenuePayoutAttemptAt(attemptNumber) : null,
+        responsePayload: { error: reason, retryScheduled: retryable }
       }
     });
 
@@ -619,7 +624,7 @@ export async function processRevenuePayout(id: string) {
       await enqueueAppRevenuePayoutWebhookIfNeeded(payout.id, "failed");
     }
 
-    return { processed: true, status: "FAILED" as RevenuePayoutStatus, reason };
+    return { processed: true, status: nextStatus, reason };
   }
 }
 
@@ -721,6 +726,12 @@ function mapPayoutStatus(status: "PENDING" | "SUCCESS" | "FAILED"): RevenuePayou
 
 function nextRevenuePayoutAttemptAt(attempts: number) {
   return new Date(Date.now() + Math.min(attempts * 60_000, 15 * 60_000));
+}
+
+function isRetryableRevenuePayoutError(reason: string) {
+  return !/(credentials are not configured|does not support|payout destination|destination profile|not verified|access .* disabled|insufficient|invalid|not allowed|forbidden|unauthorized|validation)/i.test(
+    reason
+  );
 }
 
 function readProviderReference(payload: unknown) {
