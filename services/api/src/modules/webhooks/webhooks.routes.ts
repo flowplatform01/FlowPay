@@ -77,7 +77,8 @@ export async function registerWebhookRoutes(app: FastifyInstance) {
   });
 
   app.post("/webhooks/:provider", async (request, reply) => {
-    const { provider } = request.params as { provider: GatewayProvider };
+    const rawProvider = (request.params as { provider?: string }).provider ?? "";
+    const provider = rawProvider.toUpperCase() as GatewayProvider;
     if (!Object.values(GatewayProvider).includes(provider)) {
       return reply.code(400).send({ message: "Unsupported provider" });
     }
