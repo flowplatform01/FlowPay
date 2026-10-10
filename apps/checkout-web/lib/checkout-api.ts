@@ -9,6 +9,7 @@ export type CheckoutSession = {
   grossAmount: number;
   platformFeeAmount: number;
   gatewayFeeAmount: number;
+  feePresentation?: "SEPARATE" | "COMBINED";
   currency: string;
   customerName: string | null;
   organizationName: string;

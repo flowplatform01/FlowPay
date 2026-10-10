@@ -21,6 +21,9 @@ export async function createAppRegistration(input: {
   autoCreditRefillProvider?: GatewayProvider | null;
   mode1MeteringEnabled?: boolean;
   mode2MeteringEnabled?: boolean;
+  mode1CollectionsEnabled?: boolean;
+  mode2CollectionsEnabled?: boolean;
+  checkoutFeePresentation?: "SEPARATE" | "COMBINED";
   destinationProfileProvisioningEnabled?: boolean;
   destinationProfileAutoVerifyEnabled?: boolean;
   destinationProfileLimit?: number;
@@ -51,6 +54,9 @@ export async function createAppRegistration(input: {
       autoCreditRefillProvider: input.autoCreditRefillProvider ?? null,
       mode1MeteringEnabled: input.mode1MeteringEnabled ?? false,
       mode2MeteringEnabled: input.mode2MeteringEnabled ?? true,
+      mode1CollectionsEnabled: input.mode1CollectionsEnabled ?? true,
+      mode2CollectionsEnabled: input.mode2CollectionsEnabled ?? true,
+      checkoutFeePresentation: input.checkoutFeePresentation ?? "SEPARATE",
       destinationProfileProvisioningEnabled: input.destinationProfileProvisioningEnabled ?? false,
       destinationProfileAutoVerifyEnabled: input.destinationProfileAutoVerifyEnabled ?? false,
       destinationProfileLimit: input.destinationProfileLimit ?? 0,
@@ -132,6 +138,9 @@ export async function updateAppConfiguration(
     autoCreditRefillProvider?: GatewayProvider | null;
     mode1MeteringEnabled?: boolean;
     mode2MeteringEnabled?: boolean;
+    mode1CollectionsEnabled?: boolean;
+    mode2CollectionsEnabled?: boolean;
+    checkoutFeePresentation?: "SEPARATE" | "COMBINED";
     destinationProfileProvisioningEnabled?: boolean;
     destinationProfileAutoVerifyEnabled?: boolean;
     destinationProfileLimit?: number;
@@ -158,6 +167,9 @@ export async function updateAppConfiguration(
         input.autoCreditRefillProvider === undefined ? undefined : input.autoCreditRefillProvider,
       mode1MeteringEnabled: input.mode1MeteringEnabled,
       mode2MeteringEnabled: input.mode2MeteringEnabled,
+      mode1CollectionsEnabled: input.mode1CollectionsEnabled,
+      mode2CollectionsEnabled: input.mode2CollectionsEnabled,
+      checkoutFeePresentation: input.checkoutFeePresentation,
       destinationProfileProvisioningEnabled: input.destinationProfileProvisioningEnabled,
       destinationProfileAutoVerifyEnabled: input.destinationProfileAutoVerifyEnabled,
       destinationProfileLimit: input.destinationProfileLimit,
@@ -187,6 +199,10 @@ export async function updateAppConfiguration(
         input.autoCreditRefillProvider !== undefined ||
         input.mode1MeteringEnabled !== undefined ||
         input.mode2MeteringEnabled !== undefined,
+      modeControlsUpdated:
+        input.mode1CollectionsEnabled !== undefined ||
+        input.mode2CollectionsEnabled !== undefined,
+      checkoutPresentationUpdated: input.checkoutFeePresentation !== undefined,
       destinationProvisioningUpdated:
         input.destinationProfileProvisioningEnabled !== undefined ||
         input.destinationProfileAutoVerifyEnabled !== undefined ||

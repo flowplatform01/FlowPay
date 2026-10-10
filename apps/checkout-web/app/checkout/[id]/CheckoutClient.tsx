@@ -249,6 +249,8 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
   const amount = sessionData?.amount ?? 0;
   const platformFee = sessionData?.platformFeeAmount ?? 0;
   const gatewayFee = sessionData?.gatewayFeeAmount ?? 0;
+  const combinedFee = platformFee + gatewayFee;
+  const showCombinedFee = sessionData?.feePresentation === "COMBINED";
   const total = sessionData?.grossAmount ?? amount;
   const hasFees = platformFee > 0 || gatewayFee > 0;
   const status = sessionData?.status ?? "PENDING";
@@ -482,22 +484,33 @@ export function CheckoutClient({ transactionId, sessionToken, embed = false }: C
                     {amount.toLocaleString()} {sessionData.currency}
                   </span>
                 </div>
-                {platformFee > 0 ? (
+                {showCombinedFee ? (
                   <div className="flex justify-between text-xs text-surface-400">
-                    <span>Platform fee</span>
+                    <span>Service fee</span>
                     <span>
-                      {platformFee.toLocaleString()} {sessionData.currency}
+                      {combinedFee.toLocaleString()} {sessionData.currency}
                     </span>
                   </div>
-                ) : null}
-                {gatewayFee > 0 ? (
-                  <div className="flex justify-between text-xs text-surface-400">
-                    <span>Processing fee</span>
-                    <span>
-                      {gatewayFee.toLocaleString()} {sessionData.currency}
-                    </span>
-                  </div>
-                ) : null}
+                ) : (
+                  <>
+                    {platformFee > 0 ? (
+                      <div className="flex justify-between text-xs text-surface-400">
+                        <span>Platform fee</span>
+                        <span>
+                          {platformFee.toLocaleString()} {sessionData.currency}
+                        </span>
+                      </div>
+                    ) : null}
+                    {gatewayFee > 0 ? (
+                      <div className="flex justify-between text-xs text-surface-400">
+                        <span>Processing fee</span>
+                        <span>
+                          {gatewayFee.toLocaleString()} {sessionData.currency}
+                        </span>
+                      </div>
+                    ) : null}
+                  </>
+                )}
               </div>
             ) : null}
           </div>

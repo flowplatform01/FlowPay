@@ -36,6 +36,7 @@ type TransactionMetadata = {
   checkoutDescription?: string;
   transferPurpose?: string;
   transactionNote?: string;
+  checkoutFeePresentation?: "SEPARATE" | "COMBINED";
   __flowpay_credit_purchase?: boolean;
   purchaseIntentId?: string;
   __flowpay_confirmation_gateway?: string;
@@ -97,6 +98,7 @@ export function serializeCheckoutSession(transaction: {
     grossAmount: Number(transaction.grossAmount),
     platformFeeAmount: Number(transaction.platformFeeAmount),
     gatewayFeeAmount: Number(transaction.gatewayFeeAmount),
+    feePresentation: metadata.checkoutFeePresentation ?? "SEPARATE",
     currency: transaction.currency,
     customerName: transaction.customerName,
     organizationName: transaction.organization.name,

@@ -93,6 +93,8 @@ export async function createTransaction(input: {
   });
   timer.mark("resolve-route");
 
+  assertCollectionModeEnabled(appProfile, route.mode);
+
   const appProviderAccess = appProfile.providerAccesses.find((provider) => provider.provider === route.provider);
   if (appProviderAccess && !appProviderAccess.isEnabled) {
     throw new Error(`Application access to ${route.provider} is disabled`);
@@ -215,6 +217,7 @@ export async function createTransaction(input: {
         }
       : {}),
     ...(providerRuntimeMode ? { providerRuntimeMode } : {}),
+    checkoutFeePresentation: appProfile.checkoutFeePresentation ?? "SEPARATE",
     livemode
   };
 
@@ -639,6 +642,19 @@ function shouldMeterTransaction(
   mode: OrchestrationMode
 ) {
   return mode === "MULTI_TENANT" ? app.mode2MeteringEnabled : app.mode1MeteringEnabled;
+}
+
+function assertCollectionModeEnabled(
+  app: { mode1CollectionsEnabled?: boolean; mode2CollectionsEnabled?: boolean },
+  mode: OrchestrationMode
+) {
+  if (mode === "MULTI_TENANT" && app.mode2CollectionsEnabled === false) {
+    throw new Error("Mode 2 collections are disabled for this application");
+  }
+
+  if (mode === "PLATFORM_REVENUE" && app.mode1CollectionsEnabled === false) {
+    throw new Error("Mode 1 collections are disabled for this application");
+  }
 }
 
 function calculateCreditMeteringChargeAmount(input: {

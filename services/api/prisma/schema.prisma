@@ -69,6 +69,11 @@ enum SettlementStrategy {
   NATIVE_SPLIT
 }
 
+enum CheckoutFeePresentation {
+  SEPARATE
+  COMBINED
+}
+
 enum DestinationVerificationStatus {
   PENDING
   VERIFIED
@@ -194,6 +199,9 @@ model App {
   autoCreditRefillProvider   GatewayProvider?
   mode1MeteringEnabled       Boolean                       @default(false)
   mode2MeteringEnabled       Boolean                       @default(true)
+  mode1CollectionsEnabled    Boolean                       @default(true)
+  mode2CollectionsEnabled    Boolean                       @default(true)
+  checkoutFeePresentation    CheckoutFeePresentation       @default(SEPARATE)
   destinationProfileProvisioningEnabled Boolean             @default(false)
   destinationProfileAutoVerifyEnabled   Boolean             @default(false)
   destinationProfileLimit               Int                 @default(0)
